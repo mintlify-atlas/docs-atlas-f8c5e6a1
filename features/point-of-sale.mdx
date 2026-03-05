@@ -1,0 +1,574 @@
+---
+title: Point of Sale (POS)
+description: Complete sales processing system with inventory integration, NCF generation, and accounting automation
+icon: 'cash-register'
+---
+
+## Overview
+
+The Point of Sale system is the core transaction processing engine that handles sales registration, inventory management, payment processing, and automatic accounting entries. It supports both cash and credit sales with full integration to receivables, NCF generation, and invoice printing.
+
+<Info>
+  The POS automatically handles inventory deductions, journal entries, and receivables creation in a single transaction.
+</Info>
+
+## Key Features
+
+- **Real-time inventory management** - Automatic stock deductions with warehouse tracking
+- **NCF integration** - Optional tax document generation for DGII compliance
+- **Dual payment modes** - Cash (immediate) and credit (receivables creation)
+- **Multi-payment methods** - Support for cash, cards, transfers, and custom payment types
+- **Automatic accounting** - Journal entries generated based on payment type
+- **Invoice generation** - Automatic invoice creation and printing
+- **Transaction safety** - All operations wrapped in database transactions
+
+## Sale Creation Workflow
+
+### Complete Process Flow
+
+<Steps>
+  <Step title="Create Sale Record">
+    Generate document number, record sale header with client, warehouse, and payment details
+  </Step>
+  <Step title="Register Sale Items">
+    Create line items with products, quantities, and unit prices
+  </Step>
+  <Step title="Generate NCF (Optional)">
+    If NCF type selected, generate sequential tax document number
+  </Step>
+  <Step title="Update Inventory">
+    Register output movements for each product, reducing stock
+  </Step>
+  <Step title="Process Payment">
+    For cash: create journal entry. For credit: create receivable
+  </Step>
+  <Step title="Generate Invoice">
+    Create printable invoice document
+  </Step>
+</Steps>
+
+### Service Implementation
+
+```php
+class SaleService
+{
+    public function __construct(
+        protected InventoryMovementService $inventoryService,
+        protected JournalEntryService $journalService,
+        protected ReceivableService $receivableService,
+        protected InvoiceService $invoiceService,
+        protected NcfGeneratorInterface $ncfGenerator
+    ) {}
+
+    public function create(array $data): Sale
+    {
+        return DB::transaction(function () use ($data) {
+            // 1. Generate Document Number
+            $docType = DocumentType::where('code', 'FAC')->firstOrFail();
+            $saleNumber = $docType->getNextNumberFormatted();
+            $docType->increment('current_number');
+
+            // 2. Create Sale Header
+            $sale = Sale::create([
+                'document_type_id' => $docType->id,
+                'number'           => $saleNumber,
+                'client_id'        => $data['client_id'],
+                'warehouse_id'     => $data['warehouse_id'],
+                'user_id'          => Auth::id(),
+                'sale_date'        => $data['sale_date'] ?? now(),
+                'total_amount'     => $data['total_amount'],
+                'payment_type'     => $data['payment_type'],
+                'tipo_pago_id'     => $data['tipo_pago_id'] ?? null,
+                'cash_received'    => $data['cash_received'] ?? 0,
+                'cash_change'      => $data['cash_change'] ?? 0,
+                'status'           => Sale::STATUS_COMPLETED,
+                'notes'            => $data['notes'] ?? null,
+            ]);
+
+            // 3. Generate NCF (if requested)
+            if (isset($data['ncf_type_id'])) {
+                $fullNcf = $this->ncfGenerator->generate($sale, $data['ncf_type_id']);
+                $sale->update(['ncf' => $fullNcf]);
+            }
+
+            // 4. Register Sale Items & Update Inventory
+            foreach ($data['items'] as $item) {
+                // Create sale line item
+                $sale->items()->create([
+                    'product_id' => $item['product_id'],
+                    'quantity'   => $item['quantity'],
+                    'unit_price' => $item['price'],
+                    'subtotal'   => $item['quantity'] * $item['price'],
+                ]);
+
+                // Deduct from inventory
+                $this->inventoryService->register([
+                    'warehouse_id'   => $data['warehouse_id'],
+                    'product_id'     => $item['product_id'],
+                    'quantity'       => $item['quantity'],
+                    'type'           => InventoryMovement::TYPE_OUTPUT,
+                    'description'    => "Venta {$saleNumber}",
+                    'reference_type' => Sale::class,
+                    'reference_id'   => $sale->id,
+                ]);
+            }
+
+            // 5. Process Payment
+            if ($sale->payment_type === Sale::PAYMENT_CASH) {
+                $this->generateSaleAccountingEntry($sale);
+            } else {
+                $this->receivableService->createReceivable([
+                    'client_id'       => $sale->client_id,
+                    'total_amount'    => $sale->total_amount,
+                    'emission_date'   => $sale->sale_date,
+                    'due_date'        => $sale->sale_date->copy()->addDays(30),
+                    'document_number' => $sale->number,
+                    'reference_type'  => Sale::class,
+                    'reference_id'    => $sale->id,
+                    'description'     => "Venta a crédito registrada desde POS"
+                ]);
+            }
+
+            // 6. Generate Invoice
+            $this->invoiceService->createFromSale($sale);
+
+            return $sale;
+        });
+    }
+}
+```
+
+## Payment Processing
+
+### Cash Sales
+
+For immediate payment, the system generates a journal entry:
+
+```php
+protected function generateSaleAccountingEntry(Sale $sale)
+{
+    $incomeAccount = AccountingAccount::where('code', '4.1')->first();
+    
+    // Use payment method's account or default to cash (1.1.01)
+    $debitAccountId = $sale->tipoPago?->accounting_account_id 
+                    ?? AccountingAccount::where('code', '1.1.01')->value('id');
+
+    $this->journalService->create([
+        'entry_date'  => $sale->sale_date,
+        'reference'   => $sale->number,
+        'description' => "Venta Contado ({$sale->tipoPago->nombre}) - {$sale->client->name}",
+        'status'      => JournalEntry::STATUS_POSTED,
+        'items' => [
+            [
+                'accounting_account_id' => $debitAccountId,
+                'debit'  => $sale->total_amount,
+                'credit' => 0
+            ],
+            [
+                'accounting_account_id' => $incomeAccount->id,
+                'debit'  => 0,
+                'credit' => $sale->total_amount
+            ]
+        ]
+    ]);
+}
+```
+
+**Accounting Effect:**
+```
+Debit:  1.1.01 - Caja (Cash)           $1,000.00
+Credit: 4.1    - Ingresos (Revenue)    $1,000.00
+```
+
+### Credit Sales
+
+For credit sales, a receivable is created instead of a journal entry:
+
+```php
+$this->receivableService->createReceivable([
+    'client_id'       => $sale->client_id,
+    'total_amount'    => $sale->total_amount,
+    'emission_date'   => $sale->sale_date,
+    'due_date'        => $sale->sale_date->copy()->addDays(30),
+    'document_number' => $sale->number,
+    'reference_type'  => Sale::class,
+    'reference_id'    => $sale->id,
+]);
+```
+
+**Accounting Effect:**
+```
+Debit:  1.1.02 - Cuentas por Cobrar    $1,000.00
+Credit: 4.1    - Ingresos              $1,000.00
+```
+
+<Info>
+  Receivables automatically update client balances and track payment status.
+</Info>
+
+## Sale Cancellation
+
+### Cancellation Process
+
+```php
+public function cancel(Sale $sale, ?string $reason = null): bool
+{
+    return DB::transaction(function () use ($sale, $reason) {
+        if ($sale->status === Sale::STATUS_CANCELED) {
+            throw new Exception("Sale already cancelled.");
+        }
+
+        // 1. Cancel Receivable (if credit sale)
+        if ($sale->payment_type === Sale::PAYMENT_CREDIT) {
+            $receivable = Receivable::where('reference_type', Sale::class)
+                ->where('reference_id', $sale->id)
+                ->first();
+
+            if ($receivable) {
+                if ($receivable->current_balance < $receivable->total_amount) {
+                    throw new Exception("Cannot cancel: Client has made payments.");
+                }
+                $this->receivableService->cancelReceivable($receivable);
+            }
+        }
+
+        // 2. Void NCF (if applicable)
+        NcfLog::where('sale_id', $sale->id)->update([
+            'status' => NcfLog::STATUS_VOIDED,
+            'cancellation_reason' => $reason ?? 'Manual sale cancellation'
+        ]);
+
+        // 3. Reverse Accounting Entry
+        $this->generateCancellationAccountingEntry($sale);
+
+        // 4. Return Inventory to Stock
+        foreach ($sale->items as $item) {
+            $this->inventoryService->register([
+                'warehouse_id'   => $sale->warehouse_id,
+                'product_id'     => $item->product_id,
+                'quantity'       => $item->quantity,
+                'type'           => InventoryMovement::TYPE_ADJUSTMENT,
+                'description'    => "Reversión por anulación {$sale->number}",
+                'reference_type' => Sale::class,
+                'reference_id'   => $sale->id,
+            ]);
+        }
+
+        // 5. Cancel Invoice
+        $this->invoiceService->cancelInvoice($sale);
+        
+        return $sale->update(['status' => Sale::STATUS_CANCELED]);
+    });
+}
+```
+
+<Warning>
+  Sales with partial payments cannot be cancelled. All receivable payments must be reversed first.
+</Warning>
+
+### Reversal Accounting Entry
+
+```php
+protected function generateCancellationAccountingEntry(Sale $sale)
+{
+    $incomeAccount = AccountingAccount::where('code', '4.1')->first();
+    
+    if ($sale->payment_type === Sale::PAYMENT_CASH) {
+        $contraAccount = AccountingAccount::where('code', '1.1.01')->first();
+    } else {
+        $contraAccount = $sale->client->accountingAccount 
+                      ?? AccountingAccount::where('code', '1.1.02')->first();
+    }
+
+    $this->journalService->create([
+        'entry_date'  => now(),
+        'reference'   => "REV-{$sale->number}",
+        'description' => "Anulación Venta {$sale->number}",
+        'status'      => JournalEntry::STATUS_POSTED,
+        'items' => [
+            [
+                'accounting_account_id' => $incomeAccount->id,
+                'debit'  => $sale->total_amount,
+                'credit' => 0
+            ],
+            [
+                'accounting_account_id' => $contraAccount->id,
+                'debit'  => 0,
+                'credit' => $sale->total_amount
+            ]
+        ]
+    ]);
+}
+```
+
+## Sale Model
+
+### Status Constants
+
+```php
+class Sale extends Model
+{
+    const STATUS_COMPLETED = 'completed';
+    const STATUS_CANCELED  = 'canceled';
+
+    const PAYMENT_CASH   = 'cash';
+    const PAYMENT_CREDIT = 'credit';
+
+    protected $fillable = [
+        'document_type_id',
+        'number',
+        'client_id',
+        'warehouse_id',
+        'user_id',
+        'sale_date',
+        'total_amount',
+        'payment_type',
+        'tipo_pago_id',      // Payment method (cash, card, transfer)
+        'cash_received',     // Amount tendered
+        'cash_change',       // Change given
+        'status',
+        'notes',
+    ];
+
+    public static function getStatuses(): array
+    {
+        return [
+            self::STATUS_COMPLETED => 'Completada',
+            self::STATUS_CANCELED  => 'Anulada',
+        ];
+    }
+
+    public static function getPaymentTypes(): array
+    {
+        return [
+            self::PAYMENT_CASH   => 'Contado',
+            self::PAYMENT_CREDIT => 'Crédito',
+        ];
+    }
+}
+```
+
+### Relationships
+
+```php
+public function items(): HasMany 
+{ 
+    return $this->hasMany(SaleItem::class); 
+}
+
+public function client(): BelongsTo 
+{ 
+    return $this->belongsTo(Client::class); 
+}
+
+public function warehouse(): BelongsTo 
+{ 
+    return $this->belongsTo(Warehouse::class); 
+}
+
+public function user(): BelongsTo 
+{ 
+    return $this->belongsTo(User::class); 
+}
+
+public function invoice(): HasOne 
+{ 
+    return $this->hasOne(Invoice::class); 
+}
+
+public function ncfLog(): HasOne 
+{ 
+    return $this->hasOne(NcfLog::class, 'sale_id'); 
+}
+
+public function tipoPago(): BelongsTo 
+{ 
+    return $this->belongsTo(TipoPago::class, 'tipo_pago_id'); 
+}
+```
+
+## Controller Actions
+
+### Create Sale (POS Form)
+
+```php
+public function create()
+{
+    return view('sales.create', $this->catalogService->getForForm());
+}
+```
+
+### Store Sale
+
+```php
+public function store(StoreSaleRequest $request)
+{
+    try {
+        $sale = $this->service->create($request->validated());
+
+        return redirect()
+            ->route('sales.index')
+            ->with('success', "Venta #{$sale->number} registrada con éxito.");
+    } catch (Exception $e) {
+        return back()
+            ->withInput()
+            ->with('error', "Error al procesar la venta: " . $e->getMessage());
+    }
+}
+```
+
+### Cancel Sale
+
+```php
+public function cancel(Request $request, Sale $sale)
+{
+    if ($sale->status === Sale::STATUS_CANCELED) {
+        return back()->with('error', "Esta venta ya ha sido anulada previamente.");
+    }
+
+    // Require cancellation reason for NCF sales
+    $rules = [];
+    if (!empty($sale->ncf)) {
+        $rules['cancellation_reason'] = 'required|string|min:5|max:255';
+    }
+
+    $validated = $request->validate($rules, [
+        'cancellation_reason.required' => 'El motivo de anulación es requerido para reportar a la DGII (608).'
+    ]);
+
+    try {
+        $reason = $validated['cancellation_reason'] ?? 'Anulación administrativa';
+        $this->service->cancel($sale, $reason);
+        
+        return back()->with('success', "Venta {$sale->number} anulada y stock retornado.");
+    } catch (Exception $e) {
+        Log::error("Error anulando venta {$sale->id}: " . $e->getMessage());
+        return back()->with('error', "Error: " . $e->getMessage());
+    }
+}
+```
+
+### Print Invoice
+
+```php
+public function printInvoice(Sale $sale)
+{
+    $invoice = $sale->invoice; 
+
+    if (!$invoice) {
+        return back()->with('error', 'Esta venta aún no tiene una factura generada.');
+    }
+
+    return app(InvoiceController::class)->print($invoice);
+}
+```
+
+## Data Loading
+
+Optimize queries with eager loading:
+
+```php
+public function scopeWithIndexRelations($query)
+{
+    return $query->with([
+        'client:id,name,tax_id', 
+        'user:id,name', 
+        'warehouse:id,name',
+        'tipoPago:id,nombre',
+        'items',
+        'items.product:id,name,sku'
+    ]);
+}
+```
+
+Usage:
+
+```php
+$sales = Sale::withIndexRelations()
+    ->latest('sale_date')
+    ->paginate(20);
+```
+
+## Export to Excel
+
+```php
+public function export(Request $request)
+{
+    $query = (new SaleFilters($request))
+        ->apply(Sale::query());
+
+    $fileName = 'reporte-ventas-' . now()->format('d-m-Y-H-i') . '.xlsx';
+
+    return Excel::download(new SalesExport($query), $fileName);
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always Use Transactions">
+    The POS process involves multiple tables (sales, items, inventory, accounting). Always wrap in `DB::transaction()` to ensure atomicity.
+  </Accordion>
+
+  <Accordion title="Validate Inventory Before Sale">
+    Check stock availability before processing sales to prevent negative inventory:
+    ```php
+    foreach ($items as $item) {
+        $stock = InventoryStock::where('warehouse_id', $warehouseId)
+            ->where('product_id', $item['product_id'])
+            ->first();
+        
+        if ($stock->quantity < $item['quantity']) {
+            throw new Exception("Insufficient stock for {$item['product_name']}");
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Log User Actions">
+    Always store `user_id` in sales for audit trails and commission tracking.
+  </Accordion>
+
+  <Accordion title="Handle Cash Transactions Properly">
+    Validate `cash_received >= total_amount` and calculate `cash_change` correctly:
+    ```php
+    $data['cash_change'] = $data['cash_received'] - $data['total_amount'];
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+### Sale Created But Inventory Not Updated
+
+**Cause:** Transaction rolled back or inventory service failed.
+
+**Solution:**
+- Check error logs for inventory service exceptions
+- Verify warehouse has enough stock
+- Ensure product is not marked as inactive
+
+### Duplicate Document Numbers
+
+**Cause:** Race condition in number generation.
+
+**Solution:**
+- Use database transactions around document number generation
+- Consider adding unique constraint: `unique('document_type_id', 'number')`
+
+### Receivable Not Created for Credit Sale
+
+**Cause:** Receivable service error or payment type mismatch.
+
+**Solution:**
+```php
+// Verify receivable was created
+$receivable = Receivable::where('reference_type', Sale::class)
+    ->where('reference_id', $sale->id)
+    ->first();
+
+if (!$receivable && $sale->payment_type === Sale::PAYMENT_CREDIT) {
+    // Manually create receivable
+    $receivableService->createReceivable([...]);
+}
+```

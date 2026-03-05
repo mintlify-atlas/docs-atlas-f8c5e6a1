@@ -1,0 +1,602 @@
+---
+title: "Products Module"
+description: "Product catalog management with categories, units, pricing, and inventory tracking"
+---
+
+## Overview
+
+The Products module manages your product catalog with support for categories, units of measure, pricing, cost tracking, and inventory control. It integrates with Sales and Inventory modules for complete product lifecycle management.
+
+<CardGroup cols={3}>
+  <Card title="Categories" icon="folder-tree">
+    Organize products hierarchically
+  </Card>
+  <Card title="Pricing" icon="dollar-sign">
+    Sale price and cost tracking
+  </Card>
+  <Card title="Inventory" icon="warehouse">
+    Stock tracking integration
+  </Card>
+</CardGroup>
+
+## Product Structure
+
+### Core Fields
+
+```php app/Models/Products/Product.php
+protected $fillable = [
+    'category_id',
+    'unit_id',
+    'name',
+    'slug',
+    'sku',               // Stock Keeping Unit
+    'description',
+    'image_path',
+    'price',             // Sale price
+    'cost',              // Purchase/production cost
+    'is_active',
+    'is_stockable',      // Track inventory?
+];
+```
+
+### Product Types
+
+<Tabs>
+  <Tab title="Stockable Products">
+    Physical products with inventory tracking:
+
+    ```php
+    Product::create([
+        'name' => 'Laptop Dell Inspiron 15',
+        'sku' => 'LAP-DELL-001',
+        'category_id' => 1,  // Electronics
+        'unit_id' => 1,      // Unit (piece)
+        'price' => 899.99,
+        'cost' => 650.00,
+        'is_stockable' => true,
+        'is_active' => true,
+    ]);
+    ```
+
+    **Features:**
+    - Stock levels tracked in inventory
+    - Low stock alerts
+    - COGS calculated automatically
+    - Multi-warehouse support
+  </Tab>
+  <Tab title="Non-Stockable Products">
+    Services or products without inventory:
+
+    ```php
+    Product::create([
+        'name' => 'Technical Support - 1 Hour',
+        'sku' => 'SRV-TECH-01',
+        'category_id' => 5,  // Services
+        'unit_id' => 3,      // Hour
+        'price' => 75.00,
+        'cost' => 0,
+        'is_stockable' => false,
+        'is_active' => true,
+    ]);
+    ```
+
+    **Use Cases:**
+    - Professional services
+    - Digital products
+    - Consultation fees
+    - Warranty extensions
+  </Tab>
+</Tabs>
+
+## Categories
+
+Organize products into logical groups:
+
+```php app/Models/Products/Category.php
+protected $fillable = [
+    'name',
+    'description',
+];
+
+public function products(): HasMany {
+    return $this->hasMany(Product::class);
+}
+```
+
+**Example Structure:**
+
+```
+📁 Electronics
+   ├─ Laptops
+   ├─ Desktops
+   └─ Accessories
+
+📁 Office Supplies
+   ├─ Paper
+   ├─ Writing Instruments
+   └─ Organizers
+
+📁 Services
+   ├─ Technical Support
+   └─ Installation
+```
+
+## Units of Measure
+
+Define how products are sold:
+
+```php app/Models/Products/Unit.php
+protected $fillable = [
+    'name',          // e.g., "Unit", "Box", "Liter"
+    'abbreviation',  // e.g., "un", "box", "L"
+];
+```
+
+**Common Units:**
+
+<CardGroup cols={3}>
+  <Card title="Piece" icon="cube">
+    Individual units (un, pc, ea)
+  </Card>
+  <Card title="Weight" icon="weight-scale">
+    Kilograms, pounds, grams
+  </Card>
+  <Card title="Volume" icon="flask">
+    Liters, gallons, ml
+  </Card>
+  <Card title="Length" icon="ruler">
+    Meters, feet, inches
+  </Card>
+  <Card title="Package" icon="box">
+    Box, case, pallet
+  </Card>
+  <Card title="Time" icon="clock">
+    Hour, day, month
+  </Card>
+</CardGroup>
+
+## Pricing
+
+### Sale Price
+
+The price charged to customers:
+
+```php
+$product->price = 99.99;
+```
+
+### Cost
+
+Your acquisition or production cost:
+
+```php
+$product->cost = 65.00;
+```
+
+### Margin Calculation
+
+```php
+$margin = $product->price - $product->cost;
+$marginPercent = ($margin / $product->price) * 100;
+
+echo "Margin: $" . number_format($margin, 2);
+echo " (" . number_format($marginPercent, 1) . "%)";
+```
+
+**Output:** `Margin: $34.99 (35.0%)`
+
+### Formatted Price Display
+
+```php app/Models/Products/Product.php
+public function getFormattedPriceAttribute(): string
+{
+    $config = general_config();
+    $symbol = $config->currency_symbol ?? '$';
+    
+    return $symbol . ' ' . number_format($this->price, 2);
+}
+```
+
+**Usage:**
+
+```php
+echo $product->formatted_price;
+// Output: "$ 99.99"
+```
+
+## Stock Integration
+
+### Total Stock Accessor
+
+```php app/Models/Products/Product.php
+public function getTotalStockAttribute()
+{
+    return $this->stocks()->sum('quantity');
+}
+```
+
+**Usage:**
+
+```php
+$product = Product::find(1);
+echo "Available: {$product->total_stock} units";
+```
+
+### Stock by Warehouse
+
+```php
+$product = Product::with('stocks.warehouse')->find(1);
+
+foreach ($product->stocks as $stock) {
+    echo "{$stock->warehouse->name}: {$stock->quantity}\n";
+}
+```
+
+**Output:**
+```
+Main Warehouse: 150
+Store 1: 25
+Store 2: 30
+```
+
+### Low Stock Detection
+
+```php
+$lowStock = Product::whereHas('stocks', function($q) {
+        $q->whereColumn('quantity', '<=', 'min_stock');
+    })
+    ->with('stocks')
+    ->get();
+```
+
+## Scopes
+
+### Active Products
+
+```php app/Models/Products/Product.php
+public function scopeActivo(Builder $query): Builder
+{
+    return $query->where('is_active', true);
+}
+
+public function scopeInactivo(Builder $query): Builder
+{
+    return $query->where('is_active', false);
+}
+```
+
+**Usage:**
+
+```php
+$activeProducts = Product::activo()->get();
+$inactiveProducts = Product::inactivo()->get();
+```
+
+### Stockable Products
+
+```php
+public function scopeStockable(Builder $query): Builder
+{
+    return $query->where('is_stockable', true);
+}
+```
+
+**Usage:**
+
+```php
+// Products that need inventory tracking
+$inventoryProducts = Product::stockable()->get();
+```
+
+### Optimized Loading
+
+```php
+public function scopeWithIndexRelations(Builder $query): void
+{
+    $query->with([
+        'category:id,name',
+        'unit:id,name,abbreviation'
+    ]);
+}
+```
+
+**Usage:**
+
+```php
+$products = Product::withIndexRelations()
+    ->activo()
+    ->paginate(50);
+```
+
+## Product Queries
+
+### Search Products
+
+```php
+$search = 'laptop';
+
+$results = Product::where('name', 'like', "%{$search}%")
+    ->orWhere('sku', 'like', "%{$search}%")
+    ->orWhere('description', 'like', "%{$search}%")
+    ->activo()
+    ->get();
+```
+
+### Products by Category
+
+```php
+$category = Category::find(1);
+
+$products = $category->products()
+    ->activo()
+    ->orderBy('name')
+    ->get();
+```
+
+### Best Selling Products
+
+```php
+$bestSellers = Product::select('products.*')
+    ->join('sale_items', 'sale_items.product_id', '=', 'products.id')
+    ->join('sales', 'sales.id', '=', 'sale_items.sale_id')
+    ->where('sales.status', Sale::STATUS_COMPLETED)
+    ->selectRaw('SUM(sale_items.quantity) as total_sold')
+    ->groupBy('products.id')
+    ->orderByDesc('total_sold')
+    ->take(10)
+    ->get();
+```
+
+### Profitability Analysis
+
+```php
+$profitability = Product::select('products.*')
+    ->join('sale_items', 'sale_items.product_id', '=', 'products.id')
+    ->selectRaw('
+        SUM(sale_items.quantity * sale_items.unit_price) as revenue,
+        SUM(sale_items.quantity * products.cost) as cost,
+        SUM(sale_items.quantity * (sale_items.unit_price - products.cost)) as profit
+    ')
+    ->groupBy('products.id')
+    ->orderByDesc('profit')
+    ->get();
+```
+
+## Product Management
+
+### Creating Products
+
+<Steps>
+  <Step title="Define Basic Info">
+    ```php
+    $product = new Product();
+    $product->name = 'Wireless Mouse';
+    $product->sku = 'ACC-MOUSE-001';
+    $product->description = 'Ergonomic wireless mouse with USB receiver';
+    ```
+  </Step>
+  <Step title="Set Category & Unit">
+    ```php
+    $product->category_id = 3;  // Accessories
+    $product->unit_id = 1;      // Unit
+    ```
+  </Step>
+  <Step title="Configure Pricing">
+    ```php
+    $product->cost = 12.50;
+    $product->price = 24.99;
+    ```
+  </Step>
+  <Step title="Set Inventory Options">
+    ```php
+    $product->is_stockable = true;
+    $product->is_active = true;
+    $product->save();
+    ```
+  </Step>
+  <Step title="Initialize Stock (if stockable)">
+    ```php
+    if ($product->is_stockable) {
+        InventoryStock::create([
+            'product_id' => $product->id,
+            'warehouse_id' => 1,
+            'quantity' => 100,
+            'min_stock' => 10,
+        ]);
+    }
+    ```
+  </Step>
+</Steps>
+
+### Updating Products
+
+```php
+$product = Product::find(1);
+
+// Update price
+$product->price = 27.99;
+
+// Deactivate
+$product->is_active = false;
+
+$product->save();
+```
+
+<Warning>
+  Changing a product's cost does not retroactively update historical sales. Only future sales will use the new cost.
+</Warning>
+
+### Bulk Operations
+
+```php
+// Activate multiple products
+Product::whereIn('id', [1, 2, 3, 4, 5])
+    ->update(['is_active' => true]);
+
+// Price increase by category
+Product::where('category_id', 2)
+    ->increment('price', 5.00);
+
+// Percentage increase
+Product::where('category_id', 3)
+    ->update(['price' => DB::raw('price * 1.10')]);
+```
+
+## Product Images
+
+Store product images for display:
+
+```php
+// Upload and store
+$path = $request->file('image')->store('products', 'public');
+
+$product->image_path = $path;
+$product->save();
+```
+
+**Display:**
+
+```blade
+@if($product->image_path)
+    <img src="{{ asset('storage/' . $product->image_path) }}" 
+         alt="{{ $product->name }}">
+@else
+    <img src="{{ asset('images/no-product.png') }}" 
+         alt="No image">
+@endif
+```
+
+## SKU Management
+
+Stock Keeping Units (SKU) uniquely identify products:
+
+**Best Practices:**
+
+<AccordionGroup>
+  <Accordion title="Use Meaningful Codes">
+    ```
+    LAP-DELL-001  (Laptop, Dell, sequence)
+    ACC-MOUSE-WL  (Accessory, Mouse, Wireless)
+    SRV-TECH-01   (Service, Technical, sequence)
+    ```
+  </Accordion>
+  <Accordion title="Keep SKUs Unique">
+    ```php
+    // Validation rule
+    'sku' => 'required|unique:products,sku'
+    ```
+  </Accordion>
+  <Accordion title="Use Consistent Format">
+    Choose a format and stick to it:
+    - `CAT-DESC-###`
+    - `###-CAT-DESC`
+    - `CATDESC###`
+  </Accordion>
+  <Accordion title="Consider Variations">
+    For product variants:
+    ```
+    SHIRT-RED-S   (Red shirt, size S)
+    SHIRT-RED-M   (Red shirt, size M)
+    SHIRT-BLU-S   (Blue shirt, size S)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Reporting
+
+### Product List
+
+```php
+$products = Product::withIndexRelations()
+    ->activo()
+    ->orderBy('name')
+    ->get();
+```
+
+### Stock Value Report
+
+```php
+$stockValue = Product::join('inventory_stocks', 'inventory_stocks.product_id', '=', 'products.id')
+    ->selectRaw('
+        products.*,
+        SUM(inventory_stocks.quantity) as total_quantity,
+        SUM(inventory_stocks.quantity * products.cost) as total_value
+    ')
+    ->groupBy('products.id')
+    ->get();
+```
+
+### Sales by Product
+
+```php
+$salesReport = Product::join('sale_items', 'sale_items.product_id', '=', 'products.id')
+    ->join('sales', 'sales.id', '=', 'sale_items.sale_id')
+    ->where('sales.status', Sale::STATUS_COMPLETED)
+    ->whereBetween('sales.sale_date', [$startDate, $endDate])
+    ->selectRaw('
+        products.name,
+        SUM(sale_items.quantity) as units_sold,
+        SUM(sale_items.subtotal) as revenue
+    ')
+    ->groupBy('products.id')
+    ->orderByDesc('revenue')
+    ->get();
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Regular Price Reviews">
+    Periodically review costs and prices:
+
+    ```php
+    // Products with low margins
+    $lowMargin = Product::whereRaw('(price - cost) / price < 0.20')
+        ->get();
+    ```
+  </Accordion>
+  <Accordion title="Maintain Active Status">
+    Deactivate discontinued products instead of deleting:
+
+    ```php
+    $product->is_active = false;
+    $product->save();
+    ```
+
+    This preserves historical sales data.
+  </Accordion>
+  <Accordion title="Use Stockable Flag Correctly">
+    Services should be non-stockable:
+
+    ```php
+    if ($product->is_stockable && $product->category->name === 'Services') {
+        // Flag potential configuration error
+    }
+    ```
+  </Accordion>
+  <Accordion title="Set Minimum Stock Levels">
+    For stockable products, configure low stock alerts:
+
+    ```php
+    InventoryStock::where('product_id', $productId)
+        ->update(['min_stock' => 10]);
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Inventory Module" icon="warehouse" href="/modules/inventory">
+    Stock tracking integration
+  </Card>
+  <Card title="Sales Module" icon="chart-line" href="/modules/sales">
+    Selling products
+  </Card>
+  <Card title="Product Model API" icon="code" href="/api/models/product">
+    Model reference
+  </Card>
+  <Card title="Catalog Services" icon="list" href="/development/catalog-services">
+    Product catalog implementation
+  </Card>
+</CardGroup>

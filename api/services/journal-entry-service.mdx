@@ -1,0 +1,531 @@
+---
+title: 'JournalEntryService'
+description: 'Service for creating and managing accounting journal entries with double-entry validation'
+icon: 'book'
+---
+
+## Overview
+
+The `JournalEntryService` manages all accounting journal entries in the ERP system. It enforces double-entry bookkeeping rules, validates debits and credits balance, and provides lifecycle management for journal entries.
+
+**Namespace:** `App\Services\Accounting\JournalEntries\JournalEntryService`
+
+**Location:** `app/Services/Accounting/JournalEntries/JournalEntryService.php`
+
+## Core Principles
+
+<CardGroup cols={2}>
+  <Card title="Double-Entry Validation" icon="scale-balanced">
+    Every entry must have equal debits and credits
+  </Card>
+  
+  <Card title="Transaction Safety" icon="shield-check">
+    All operations wrapped in database transactions
+  </Card>
+  
+  <Card title="State Management" icon="diagram-next">
+    Draft → Posted → (optionally) Cancelled
+  </Card>
+  
+  <Card title="Audit Trail" icon="clock-rotate-left">
+    Tracks creator and maintains reference documentation
+  </Card>
+</CardGroup>
+
+---
+
+## Methods
+
+### create()
+
+Creates a new journal entry with its detail lines.
+
+```php
+public function create(array $data): JournalEntry
+```
+
+<ParamField path="data" type="array" required>
+  Journal entry data with the following structure:
+  
+  <Expandable title="data properties">
+    <ParamField path="entry_date" type="string" required>
+      Entry date (Carbon parseable format, typically Y-m-d)
+    </ParamField>
+    
+    <ParamField path="description" type="string" required>
+      Description of the transaction
+    </ParamField>
+    
+    <ParamField path="items" type="array" required>
+      Array of journal entry items (detail lines), each containing:
+      - `accounting_account_id` (int): Account ID
+      - `debit` (float): Debit amount (0 if credit line)
+      - `credit` (float): Credit amount (0 if debit line)
+      - `note` (string, optional): Line-level note
+    </ParamField>
+    
+    <ParamField path="reference" type="string" optional>
+      Reference number or code (e.g., invoice number, sale number)
+    </ParamField>
+    
+    <ParamField path="status" type="string" optional>
+      Entry status: `'draft'`, `'posted'`, or `'cancelled'`. Defaults to `'draft'`
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="return" type="JournalEntry">
+  Returns the created JournalEntry model with all items
+</ResponseField>
+
+**Validation Rules:**
+
+1. **Double-Entry Balance** - Total debits must equal total credits (within 0.001 tolerance)
+2. **Positive Amount** - Total debit/credit must be greater than zero
+3. **Valid Accounts** - All accounting account IDs must exist
+
+**Process:**
+
+1. Sums all debit and credit amounts from items array
+2. Validates debits equal credits (allows 0.001 margin for decimal precision)
+3. Validates total is greater than zero
+4. Creates journal entry header with authenticated user as creator
+5. Creates all journal entry items (detail lines)
+6. Returns completed journal entry
+
+#### Example Usage
+
+```php
+use App\Services\Accounting\JournalEntries\JournalEntryService;
+use App\Models\Accounting\JournalEntry;
+
+public function __construct(
+    protected JournalEntryService $journalService
+) {}
+
+// Simple cash sale entry
+public function recordCashSale()
+{
+    $entry = $this->journalService->create([
+        'entry_date' => now(),
+        'reference' => 'FAC-2024-150',
+        'description' => 'Venta Contado - Cliente XYZ',
+        'status' => JournalEntry::STATUS_POSTED,
+        'items' => [
+            [
+                'accounting_account_id' => 1, // Cash Account (1.1.01)
+                'debit' => 1000.00,
+                'credit' => 0,
+                'note' => 'Efectivo recibido',
+            ],
+            [
+                'accounting_account_id' => 15, // Income Account (4.1)
+                'debit' => 0,
+                'credit' => 1000.00,
+                'note' => 'Ingreso por venta',
+            ],
+        ],
+    ]);
+
+    return $entry;
+}
+```
+
+```php
+// Credit sale with receivable
+public function recordCreditSale()
+{
+    $entry = $this->journalService->create([
+        'entry_date' => now(),
+        'reference' => 'FAC-2024-151',
+        'description' => 'Venta a Crédito - Cliente ABC Corp',
+        'status' => JournalEntry::STATUS_POSTED,
+        'items' => [
+            [
+                'accounting_account_id' => 2, // Accounts Receivable (1.1.02)
+                'debit' => 5000.00,
+                'credit' => 0,
+                'note' => 'Cargo de deuda',
+            ],
+            [
+                'accounting_account_id' => 15, // Income Account (4.1)
+                'debit' => 0,
+                'credit' => 5000.00,
+                'note' => 'Ingreso por venta a crédito',
+            ],
+        ],
+    ]);
+
+    return $entry;
+}
+```
+
+```php
+// Multi-line entry (purchase with multiple accounts)
+public function recordPurchaseWithExpenses()
+{
+    $entry = $this->journalService->create([
+        'entry_date' => '2024-03-15',
+        'reference' => 'PO-2024-045',
+        'description' => 'Compra de mercancía con gastos de importación',
+        'status' => JournalEntry::STATUS_DRAFT, // Can be reviewed before posting
+        'items' => [
+            [
+                'accounting_account_id' => 10, // Inventory (1.2.01)
+                'debit' => 8000.00,
+                'credit' => 0,
+                'note' => 'Mercancía comprada',
+            ],
+            [
+                'accounting_account_id' => 25, // Import Expenses (5.3)
+                'debit' => 500.00,
+                'credit' => 0,
+                'note' => 'Gastos de importación',
+            ],
+            [
+                'accounting_account_id' => 1, // Cash (1.1.01)
+                'debit' => 0,
+                'credit' => 8500.00,
+                'note' => 'Pago total de compra',
+            ],
+        ],
+    ]);
+
+    return $entry;
+}
+```
+
+---
+
+### update()
+
+Updates an existing journal entry and synchronizes its items.
+
+```php
+public function update(JournalEntry $entry, array $data): JournalEntry
+```
+
+<ParamField path="entry" type="JournalEntry" required>
+  The journal entry instance to update
+</ParamField>
+
+<ParamField path="data" type="array" required>
+  Updated data with same structure as `create()` method
+</ParamField>
+
+<ResponseField name="return" type="JournalEntry">
+  Returns the updated JournalEntry model
+</ResponseField>
+
+**Restrictions:**
+- Can only update entries in `'draft'` status
+- Posted or cancelled entries cannot be modified
+- Throws exception if attempting to update non-draft entry
+
+**Process:**
+
+1. Validates entry is in draft status
+2. Validates new items array (debits = credits)
+3. Updates journal entry header fields
+4. **Deletes all existing items**
+5. Creates new items from data array
+6. Returns updated entry
+
+#### Example Usage
+
+```php
+use App\Models\Accounting\JournalEntry;
+
+public function correctDraftEntry($entryId)
+{
+    $entry = JournalEntry::findOrFail($entryId);
+    
+    try {
+        $updatedEntry = $this->journalService->update($entry, [
+            'entry_date' => now(),
+            'reference' => 'FAC-2024-150-CORRECTED',
+            'description' => 'Venta Contado - Cliente XYZ (corregido)',
+            'items' => [
+                [
+                    'accounting_account_id' => 1,
+                    'debit' => 1200.00,  // Corrected amount
+                    'credit' => 0,
+                ],
+                [
+                    'accounting_account_id' => 15,
+                    'debit' => 0,
+                    'credit' => 1200.00,
+                ],
+            ],
+        ]);
+        
+        return $updatedEntry;
+    } catch (\Exception $e) {
+        // Handle error (likely trying to update posted entry)
+        return response()->json(['error' => $e->getMessage()], 400);
+    }
+}
+```
+
+---
+
+### post()
+
+Changes the status of a journal entry from draft to posted.
+
+```php
+public function post(JournalEntry $entry): bool
+```
+
+<ParamField path="entry" type="JournalEntry" required>
+  The journal entry to post
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if posting was successful
+</ResponseField>
+
+**Restrictions:**
+- Entry must be in `'draft'` status
+- Throws exception if entry is already posted or cancelled
+
+**Impact:**
+- Once posted, the entry cannot be edited via `update()`
+- Posted entries represent committed accounting transactions
+- In accounting practice, posted entries should not be modified
+
+#### Example Usage
+
+```php
+public function reviewAndPost($entryId)
+{
+    $entry = JournalEntry::findOrFail($entryId);
+    
+    // Verify the entry is balanced (should always be true if created via service)
+    if (!$entry->isBalanced()) {
+        return response()->json(['error' => 'Entry is not balanced'], 400);
+    }
+    
+    // Post the entry
+    try {
+        $this->journalService->post($entry);
+        
+        return response()->json([
+            'message' => 'Entry posted successfully',
+            'entry_id' => $entry->id,
+            'status' => $entry->status,
+        ]);
+    } catch (\Exception $e) {
+        return response()->json(['error' => $e->getMessage()], 400);
+    }
+}
+```
+
+---
+
+### cancel()
+
+Cancels a journal entry by changing its status to cancelled.
+
+```php
+public function cancel(JournalEntry $entry): bool
+```
+
+<ParamField path="entry" type="JournalEntry" required>
+  The journal entry to cancel
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if cancellation was successful
+</ResponseField>
+
+**Note:** This method only changes the status flag. It does **not** create reversal entries. To reverse the accounting effect of an entry, create a new journal entry with opposite debits/credits.
+
+#### Example Usage
+
+```php
+public function cancelEntry($entryId)
+{
+    $entry = JournalEntry::findOrFail($entryId);
+    
+    $result = $this->journalService->cancel($entry);
+    
+    if ($result) {
+        return response()->json([
+            'message' => 'Entry cancelled',
+            'entry_id' => $entry->id,
+        ]);
+    }
+}
+```
+
+```php
+// To properly reverse an accounting entry, create an opposite entry
+public function reverseEntry($originalEntryId)
+{
+    $original = JournalEntry::with('items')->findOrFail($originalEntryId);
+    
+    // Cancel original
+    $this->journalService->cancel($original);
+    
+    // Create reversal entry
+    $reversalItems = [];
+    foreach ($original->items as $item) {
+        $reversalItems[] = [
+            'accounting_account_id' => $item->accounting_account_id,
+            'debit' => $item->credit,   // Swap debit and credit
+            'credit' => $item->debit,
+            'note' => "Reversal: {$item->note}",
+        ];
+    }
+    
+    $reversal = $this->journalService->create([
+        'entry_date' => now(),
+        'reference' => "REV-{$original->reference}",
+        'description' => "Reversal of: {$original->description}",
+        'status' => JournalEntry::STATUS_POSTED,
+        'items' => $reversalItems,
+    ]);
+    
+    return $reversal;
+}
+```
+
+---
+
+## JournalEntry Model Constants
+
+```php
+JournalEntry::STATUS_DRAFT     // 'draft'
+JournalEntry::STATUS_POSTED    // 'posted'
+JournalEntry::STATUS_CANCELLED // 'cancelled'
+```
+
+---
+
+## Exception Handling
+
+<AccordionGroup>
+  <Accordion title="Unbalanced Entry">
+    **Exception:** `"Error contable: El asiento no está cuadrado. Débito: {amount}, Crédito: {amount}"`
+    
+    **Cause:** Total debits do not equal total credits
+    
+    **Resolution:** Ensure all items are correctly specified with balanced debits and credits
+    
+    ```php
+    // ❌ Incorrect - Not balanced
+    'items' => [
+        ['accounting_account_id' => 1, 'debit' => 1000, 'credit' => 0],
+        ['accounting_account_id' => 2, 'debit' => 0, 'credit' => 900], // Wrong!
+    ]
+    
+    // ✅ Correct - Balanced
+    'items' => [
+        ['accounting_account_id' => 1, 'debit' => 1000, 'credit' => 0],
+        ['accounting_account_id' => 2, 'debit' => 0, 'credit' => 1000],
+    ]
+    ```
+  </Accordion>
+
+  <Accordion title="Zero Amount Entry">
+    **Exception:** `"El monto del asiento debe ser mayor a cero."`
+    
+    **Cause:** All items have zero amounts
+    
+    **Resolution:** Ensure at least one line has a non-zero debit or credit
+  </Accordion>
+
+  <Accordion title="Cannot Edit Posted Entry">
+    **Exception:** `"No se puede editar un asiento que ya ha sido asentado o anulado."`
+    
+    **Cause:** Attempting to update an entry that is posted or cancelled
+    
+    **Resolution:** 
+    - Only draft entries can be edited
+    - To modify a posted entry, create a reversal entry and a new corrected entry
+  </Accordion>
+
+  <Accordion title="Cannot Post Non-Draft Entry">
+    **Exception:** `"Solo se pueden asentar documentos en estado Borrador."`
+    
+    **Cause:** Attempting to post an entry that is not in draft status
+    
+    **Resolution:** Verify entry status before calling `post()`
+  </Accordion>
+
+  <Accordion title="Update Validation Error">
+    **Exception:** `"Error: El asiento no está cuadrado. Diferencia: {amount}"`
+    
+    **Cause:** Updated items array does not balance
+    
+    **Resolution:** Same as "Unbalanced Entry" - verify debit/credit totals match
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Database Transaction Safety
+
+All methods (`create()`, `update()`, `post()`, `cancel()`) wrap their operations in database transactions using `DB::transaction()`. This ensures:
+
+- Entry header and items are created/updated atomically
+- Partial failures trigger complete rollback
+- Data consistency is maintained
+
+---
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Draft Status" icon="file-pen">
+    Create entries as drafts initially, then post after review
+  </Card>
+  
+  <Card title="Clear References" icon="link">
+    Always include reference numbers to link entries to source documents
+  </Card>
+  
+  <Card title="Descriptive Notes" icon="message">
+    Add line-level notes to clarify the purpose of each debit/credit
+  </Card>
+  
+  <Card title="Reversal Pattern" icon="arrow-rotate-left">
+    To correct posted entries, cancel and create reversal + correction entries
+  </Card>
+</CardGroup>
+
+---
+
+## Integration Points
+
+### Used By
+
+- **SaleService** - Creates entries for cash sales and cancellations
+- **InventoryMovementService** - Creates entries for inventory movements
+- **ReceivableService** - Creates entries for credit sales
+- **PaymentService** - Creates entries for payment receipts
+- **PurchaseService** - Creates entries for purchase transactions
+
+### Model Methods
+
+The `JournalEntry` model provides these helper methods:
+
+```php
+// Check if entry is balanced
+$entry->isBalanced(); // Returns bool
+
+// Get total debits
+$totalDebits = $entry->total_debit; // Accessor
+
+// Get total credits
+$totalCredits = $entry->total_credit; // Accessor
+```
+
+---
+
+## Related Models
+
+- [JournalEntry Model](/api/models/journal-entry) - Entry header
+- [JournalItem Model](/api/models/journal-item) - Entry detail lines
+- [AccountingAccount Model](/api/models/accounting-account) - Chart of accounts

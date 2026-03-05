@@ -1,0 +1,471 @@
+---
+title: 'InventoryMovementService'
+description: 'Service for managing inventory movements with automatic stock tracking and accounting integration'
+icon: 'boxes-stacked'
+---
+
+## Overview
+
+The `InventoryMovementService` manages all inventory movements including inputs (purchases/production), outputs (sales), adjustments (corrections/returns), and transfers between warehouses. It automatically updates stock levels and generates corresponding accounting journal entries.
+
+**Namespace:** `App\Services\Inventory\InventoryMovementService`
+
+**Location:** `app/Services/Inventory/InventoryMovementService.php`
+
+## Methods
+
+### register()
+
+Registers a new inventory movement, updates stock levels, and creates accounting entries.
+
+```php
+public function register(array $data): InventoryMovement
+```
+
+<ParamField path="data" type="array" required>
+  Movement data array with the following structure:
+  
+  <Expandable title="data properties">
+    <ParamField path="warehouse_id" type="int" required>
+      Source warehouse ID
+    </ParamField>
+    
+    <ParamField path="product_id" type="int" required>
+      Product ID being moved
+    </ParamField>
+    
+    <ParamField path="quantity" type="int" required>
+      Quantity to move. Can be negative for adjustments.
+    </ParamField>
+    
+    <ParamField path="type" type="string" required>
+      Movement type: `'input'`, `'output'`, `'adjustment'`, or `'transfer'`
+    </ParamField>
+    
+    <ParamField path="description" type="string" required>
+      Description of the movement for audit trail
+    </ParamField>
+    
+    <ParamField path="to_warehouse_id" type="int" optional>
+      Destination warehouse ID (required for transfer movements)
+    </ParamField>
+    
+    <ParamField path="reference_type" type="string" optional>
+      Fully qualified class name of the related model (e.g., `App\Models\Sales\Sale`)
+    </ParamField>
+    
+    <ParamField path="reference_id" type="int" optional>
+      ID of the related record (polymorphic relationship)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="return" type="InventoryMovement">
+  Returns the created InventoryMovement model instance
+</ResponseField>
+
+**Processing Logic:**
+
+1. **Stock Initialization** - Creates stock record if it doesn't exist (quantity 0, min_stock 0)
+2. **Stock Calculation:**
+   - **Input:** Increases stock by absolute quantity
+   - **Output/Transfer:** Decreases stock by absolute quantity
+   - **Adjustment:** Applies raw quantity (can be positive or negative)
+3. **Validation** - Throws exception if resulting stock would be negative
+4. **Movement Creation** - Creates inventory movement record with previous and current stock
+5. **Stock Update** - Updates the warehouse stock quantity
+6. **Accounting Entry** - Generates appropriate journal entry based on movement type
+7. **Transfer Mirror** - For transfers, creates corresponding entry movement in destination warehouse
+
+#### Movement Types
+
+<CardGroup cols={2}>
+  <Card title="Input" icon="arrow-down">
+    Increases inventory (purchases, production)
+    - Quantity stored as **positive**
+    - Increases warehouse stock
+  </Card>
+  
+  <Card title="Output" icon="arrow-up">
+    Decreases inventory (sales, consumption)
+    - Quantity stored as **negative**
+    - Decreases warehouse stock
+  </Card>
+  
+  <Card title="Adjustment" icon="sliders">
+    Corrections, returns, losses
+    - Quantity can be **positive or negative**
+    - Adds raw quantity to stock
+  </Card>
+  
+  <Card title="Transfer" icon="right-left">
+    Between warehouses
+    - Quantity stored as **negative** in source
+    - Creates mirror **positive** entry in destination
+  </Card>
+</CardGroup>
+
+#### Example Usage
+
+```php
+use App\Services\Inventory\InventoryMovementService;
+use App\Models\Inventory\InventoryMovement;
+
+public function __construct(
+    protected InventoryMovementService $inventoryService
+) {}
+
+// Register a purchase (input)
+public function registerPurchase()
+{
+    $movement = $this->inventoryService->register([
+        'warehouse_id' => 1,
+        'product_id' => 25,
+        'quantity' => 100,
+        'type' => InventoryMovement::TYPE_INPUT,
+        'description' => 'Purchase order #PO-2024-001',
+        'reference_type' => 'App\\Models\\Purchases\\Purchase',
+        'reference_id' => 123,
+    ]);
+
+    return $movement;
+}
+```
+
+```php
+// Register a sale output (usually called by SaleService)
+public function registerSaleOutput($saleId)
+{
+    $movement = $this->inventoryService->register([
+        'warehouse_id' => 1,
+        'product_id' => 10,
+        'quantity' => 5,
+        'type' => InventoryMovement::TYPE_OUTPUT,
+        'description' => 'Venta FAC-2024-150',
+        'reference_type' => 'App\\Models\\Sales\\Sale',
+        'reference_id' => $saleId,
+    ]);
+
+    return $movement;
+}
+```
+
+```php
+// Register inventory adjustment (positive - restock)
+public function registerRestock()
+{
+    $movement = $this->inventoryService->register([
+        'warehouse_id' => 1,
+        'product_id' => 30,
+        'quantity' => 10, // Positive adjustment
+        'type' => InventoryMovement::TYPE_ADJUSTMENT,
+        'description' => 'Restock - customer return',
+    ]);
+
+    return $movement;
+}
+```
+
+```php
+// Register inventory adjustment (negative - loss/damage)
+public function registerLoss()
+{
+    $movement = $this->inventoryService->register([
+        'warehouse_id' => 1,
+        'product_id' => 30,
+        'quantity' => -5, // Negative adjustment
+        'type' => InventoryMovement::TYPE_ADJUSTMENT,
+        'description' => 'Damaged goods - water leak',
+    ]);
+
+    return $movement;
+}
+```
+
+```php
+// Register warehouse transfer
+public function transferStock()
+{
+    $movement = $this->inventoryService->register([
+        'warehouse_id' => 1,        // Source warehouse
+        'to_warehouse_id' => 2,     // Destination warehouse
+        'product_id' => 15,
+        'quantity' => 20,
+        'type' => InventoryMovement::TYPE_TRANSFER,
+        'description' => 'Transfer to secondary warehouse',
+    ]);
+
+    return $movement;
+}
+```
+
+---
+
+## Protected Methods
+
+### generateAccountingEntry()
+
+Generates the appropriate journal entry based on movement type and context.
+
+```php
+protected function generateAccountingEntry(
+    InventoryMovement $movement,
+    $product,
+    $quantity
+)
+```
+
+<ParamField path="movement" type="InventoryMovement" required>
+  The created inventory movement record
+</ParamField>
+
+<ParamField path="product" type="Product" required>
+  Product model instance (used to calculate cost)
+</ParamField>
+
+<ParamField path="quantity" type="int" required>
+  Absolute quantity value
+</ParamField>
+
+**Accounting Logic by Movement Type:**
+
+<AccordionGroup>
+  <Accordion title="TYPE_INPUT - Purchase or Production">
+    **Calculation:** `totalValue = quantity × product.cost`
+    
+    **If reference is Production:**
+    - Debit: Warehouse Account (inventory asset increase)
+    - Credit: Production Account 5.2 (cost of internal production)
+    
+    **If reference is Purchase (default):**
+    - Debit: Warehouse Account (inventory asset increase)
+    - Credit: Cash Account 1.1.01 (payment for purchase)
+    
+    ```php
+    // Purchase entry example:
+    // DR: Warehouse Account (1.2.01)  $1,000
+    // CR: Cash (1.1.01)               $1,000
+    ```
+  </Accordion>
+
+  <Accordion title="TYPE_OUTPUT - Sale or Consumption">
+    **Note:** This records the **cost** of goods sold, not the sale price.
+    
+    **Calculation:** `totalValue = quantity × product.cost`
+    
+    - Debit: Cost of Sales Account 5.1 (expense recognition)
+    - Credit: Warehouse Account (inventory asset decrease)
+    
+    ```php
+    // Output entry example:
+    // DR: Cost of Sales (5.1)        $500
+    // CR: Warehouse Account (1.2.01)  $500
+    ```
+  </Accordion>
+
+  <Accordion title="TYPE_TRANSFER - Between Warehouses">
+    **Reclassification between inventory asset accounts**
+    
+    - Debit: Destination Warehouse Account (asset increase)
+    - Credit: Source Warehouse Account (asset decrease)
+    
+    ```php
+    // Transfer entry example:
+    // DR: Warehouse B Account (1.2.02)  $300
+    // CR: Warehouse A Account (1.2.01)  $300
+    ```
+  </Accordion>
+
+  <Accordion title="TYPE_ADJUSTMENT - Corrections/Returns">
+    **Positive Adjustment (quantity > 0):**
+    
+    **If reference is Sale (reversal):**
+    - Debit: Warehouse Account (inventory restored)
+    - Credit: Cost of Sales Account 5.1 (cost reversal)
+    
+    **If reference is other (correction/production):**
+    - Debit: Warehouse Account (inventory increase)
+    - Credit: Production Account 5.2 (internal adjustment)
+    
+    **Negative Adjustment (quantity < 0):**
+    - Debit: Cost of Sales Account 5.1 (loss/shrinkage expense)
+    - Credit: Warehouse Account (inventory reduction)
+    
+    ```php
+    // Positive adjustment (return):
+    // DR: Warehouse Account (1.2.01)  $200
+    // CR: Cost of Sales (5.1)         $200
+    
+    // Negative adjustment (loss):
+    // DR: Cost of Sales (5.1)         $100
+    // CR: Warehouse Account (1.2.01)  $100
+    ```
+  </Accordion>
+</AccordionGroup>
+
+**Source Code Reference:** `InventoryMovementService.php:75-133`
+
+---
+
+### createItem()
+
+Helper method to create individual journal entry items.
+
+```php
+protected function createItem(
+    $entry,
+    $accountId,
+    $debit,
+    $credit,
+    $note
+)
+```
+
+<ParamField path="entry" type="JournalEntry" required>
+  The journal entry instance
+</ParamField>
+
+<ParamField path="accountId" type="int" required>
+  Accounting account ID. Throws exception if null.
+</ParamField>
+
+<ParamField path="debit" type="float" required>
+  Debit amount
+</ParamField>
+
+<ParamField path="credit" type="float" required>
+  Credit amount
+</ParamField>
+
+<ParamField path="note" type="string" required>
+  Line item description
+</ParamField>
+
+**Source Code Reference:** `InventoryMovementService.php:135-145`
+
+---
+
+### registerTransferEntry()
+
+Creates the mirror inventory movement in the destination warehouse for transfers.
+
+```php
+protected function registerTransferEntry(
+    InventoryMovement $parentMovement,
+    array $data
+)
+```
+
+<ParamField path="parentMovement" type="InventoryMovement" required>
+  The source warehouse movement record
+</ParamField>
+
+<ParamField path="data" type="array" required>
+  Original movement data including `to_warehouse_id`
+</ParamField>
+
+**Process:**
+
+1. Initializes or retrieves destination warehouse stock
+2. Calculates new destination stock (increases by quantity)
+3. Creates positive entry movement in destination
+4. Updates destination stock quantity
+5. Links to parent movement via polymorphic reference
+
+**Source Code Reference:** `InventoryMovementService.php:147-172`
+
+---
+
+## InventoryMovement Model Constants
+
+```php
+InventoryMovement::TYPE_INPUT      // 'input'
+InventoryMovement::TYPE_OUTPUT     // 'output'
+InventoryMovement::TYPE_ADJUSTMENT // 'adjustment'
+InventoryMovement::TYPE_TRANSFER   // 'transfer'
+```
+
+---
+
+## Exception Handling
+
+<AccordionGroup>
+  <Accordion title="Insufficient Stock">
+    **Exception:** `"Stock insuficiente en el almacén de origen."`
+    
+    **Cause:** Attempting to reduce stock below zero
+    
+    **Resolution:** Verify available stock before creating output or adjustment movements
+    
+    ```php
+    $stock = InventoryStock::where('warehouse_id', 1)
+        ->where('product_id', 10)
+        ->first();
+    
+    if ($stock->quantity < $requestedQuantity) {
+        throw new Exception('Insufficient stock');
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Missing Accounting Configuration">
+    **Exception:** `"Error Contable: Almacén o Contrapartida no tiene cuenta asignada."`
+    
+    **Cause:** Warehouse doesn't have an accounting account assigned, or system accounts are missing
+    
+    **Resolution:** 
+    - Ensure each warehouse has an `accounting_account_id` assigned
+    - Verify required accounts exist: Cash (1.1.01), Cost of Sales (5.1), Production (5.2)
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Accounting Accounts Reference
+
+The service uses these standard accounting accounts:
+
+| Account Code | Description | Usage |
+|--------------|-------------|-------|
+| 1.1.01 | Cash | Credited on purchases |
+| 1.2.xx | Warehouse Accounts | Each warehouse has its own inventory asset account |
+| 5.1 | Cost of Sales | Debited on outputs, adjusted on returns |
+| 5.2 | Production Cost | Credited on internal production inputs |
+
+---
+
+## Database Transaction Safety
+
+The `register()` method wraps all operations in a database transaction using `DB::transaction()`. This ensures:
+
+- Stock updates are atomic
+- Accounting entries are created only if stock update succeeds
+- Transfer mirror entries are created together
+- All changes are rolled back on any failure
+
+---
+
+## Integration Points
+
+### Used By
+
+- **SaleService** - Creates output movements on sales, adjustment movements on cancellations
+- **PurchaseService** - Creates input movements for inventory purchases
+- **ProductionService** - Creates input movements for manufactured goods
+- **TransferController** - Direct usage for warehouse transfers
+
+### Uses
+
+- **JournalEntry Model** - Creates accounting entries
+- **InventoryStock Model** - Updates stock levels
+- **Product Model** - Retrieves product cost for accounting calculations
+
+---
+
+## Related Models
+
+- [InventoryMovement Model](/api/models/inventory-movement) - Movement records
+- [InventoryStock Model](/api/models/inventory-stock) - Stock levels per warehouse
+- [Warehouse Model](/api/models/warehouse) - Warehouse configuration
+- [Product Model](/api/models/product) - Product cost information
+- [JournalEntry Model](/api/models/journal-entry) - Accounting entries

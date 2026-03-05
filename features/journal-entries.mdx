@@ -1,0 +1,604 @@
+---
+title: Journal Entries
+description: Double-entry accounting system with automatic journal entry generation, validation, and posting
+icon: 'book'
+---
+
+## Overview
+
+The Journal Entry system implements double-entry bookkeeping principles, automatically generating accounting entries for sales, payments, and other financial transactions. It provides manual entry capabilities for adjustments and ensures all entries maintain balanced debits and credits.
+
+<Info>
+  All journal entries are automatically validated to ensure debits equal credits before posting.
+</Info>
+
+## Core Concepts
+
+### Double-Entry Accounting
+
+Every financial transaction affects at least two accounts:
+
+```
+Debit:  Asset or Expense increases
+Credit: Liability, Equity, or Revenue increases
+
+Rule: Total Debits = Total Credits
+```
+
+### Journal Entry Structure
+
+```php
+class JournalEntry extends Model
+{
+    const STATUS_DRAFT     = 'draft';
+    const STATUS_POSTED    = 'posted';
+    const STATUS_CANCELLED = 'cancelled';
+
+    protected $fillable = [
+        'entry_date',    // Accounting date
+        'reference',     // Source document number
+        'description',   // Explanation of transaction
+        'status',        // Draft, Posted, or Cancelled
+        'created_by'     // User who created entry
+    ];
+
+    protected $casts = [
+        'entry_date' => 'date',
+    ];
+}
+```
+
+### Journal Items (Lines)
+
+Each entry contains multiple line items:
+
+```php
+class JournalItem extends Model
+{
+    protected $fillable = [
+        'journal_entry_id',
+        'accounting_account_id',  // Chart of accounts reference
+        'debit',                  // Debit amount (0 if credit)
+        'credit',                 // Credit amount (0 if debit)
+        'note'                    // Line-level description
+    ];
+}
+```
+
+## Creating Journal Entries
+
+### Manual Entry Creation
+
+```php
+class JournalEntryService
+{
+    public function create(array $data): JournalEntry
+    {
+        return DB::transaction(function () use ($data) {
+            
+            // 1. Validate Double-Entry Principle
+            $items = collect($data['items']);
+            $totalDebit = $items->sum('debit');
+            $totalCredit = $items->sum('credit');
+
+            // Allow minimal decimal margin for rounding
+            if (abs($totalDebit - $totalCredit) > 0.001) {
+                throw new Exception(
+                    "Accounting error: Entry is not balanced. " .
+                    "Debit: {$totalDebit}, Credit: {$totalCredit}"
+                );
+            }
+
+            if ($totalDebit <= 0) {
+                throw new Exception("Entry amount must be greater than zero.");
+            }
+
+            // 2. Create Entry Header
+            $entry = JournalEntry::create([
+                'entry_date'  => $data['entry_date'],
+                'reference'   => $data['reference'] ?? null,
+                'description' => $data['description'],
+                'status'      => $data['status'] ?? JournalEntry::STATUS_DRAFT,
+                'created_by'  => Auth::id(),
+            ]);
+
+            // 3. Create Line Items
+            foreach ($data['items'] as $item) {
+                $entry->items()->create([
+                    'accounting_account_id' => $item['accounting_account_id'],
+                    'debit'                 => $item['debit'] ?? 0,
+                    'credit'                => $item['credit'] ?? 0,
+                    'note'                  => $item['note'] ?? null,
+                ]);
+            }
+
+            return $entry;
+        });
+    }
+}
+```
+
+<Steps>
+  <Step title="Validate Balance">
+    Ensures total debits equal total credits within a 0.001 tolerance for rounding
+  </Step>
+  <Step title="Create Header">
+    Records entry date, reference, description, and status
+  </Step>
+  <Step title="Create Line Items">
+    Registers each debit and credit to corresponding accounts
+  </Step>
+</Steps>
+
+### Example: Cash Sale Entry
+
+```php
+$journalService->create([
+    'entry_date'  => now(),
+    'reference'   => 'SALE-00123',
+    'description' => 'Venta Contado - Cliente: ABC Corp',
+    'status'      => JournalEntry::STATUS_POSTED,
+    'items' => [
+        [
+            'accounting_account_id' => 1,  // 1.1.01 - Caja
+            'debit'  => 1000.00,
+            'credit' => 0,
+            'note'   => 'Cobro en efectivo'
+        ],
+        [
+            'accounting_account_id' => 5,  // 4.1 - Ingresos
+            'debit'  => 0,
+            'credit' => 1000.00,
+            'note'   => 'Ingreso por venta'
+        ]
+    ]
+]);
+```
+
+**Accounting Effect:**
+```
+Date: 2026-03-05
+Reference: SALE-00123
+Description: Venta Contado - Cliente: ABC Corp
+
+┌──────────────────────────────┬──────────┬──────────┐
+│ Account                      │ Debit    │ Credit   │
+├──────────────────────────────┼──────────┼──────────┤
+│ 1.1.01 - Caja               │ 1,000.00 │     0.00 │
+│ 4.1    - Ingresos           │     0.00 │ 1,000.00 │
+├──────────────────────────────┼──────────┼──────────┤
+│ TOTAL                        │ 1,000.00 │ 1,000.00 │
+└──────────────────────────────┴──────────┴──────────┘
+```
+
+## Automatic Entry Generation
+
+### Sales Integration
+
+Cash sales automatically generate journal entries:
+
+```php
+protected function generateSaleAccountingEntry(Sale $sale)
+{
+    $incomeAccount = AccountingAccount::where('code', '4.1')->first();
+    $debitAccountId = $sale->tipoPago?->accounting_account_id 
+                    ?? AccountingAccount::where('code', '1.1.01')->value('id');
+
+    $this->journalService->create([
+        'entry_date'  => $sale->sale_date,
+        'reference'   => $sale->number,
+        'description' => "Venta Contado ({$sale->tipoPago->nombre}) - {$sale->client->name}",
+        'status'      => JournalEntry::STATUS_POSTED,
+        'items' => [
+            ['accounting_account_id' => $debitAccountId, 'debit' => $sale->total_amount, 'credit' => 0],
+            ['accounting_account_id' => $incomeAccount->id, 'debit' => 0, 'credit' => $sale->total_amount]
+        ]
+    ]);
+}
+```
+
+### Receivables Integration
+
+Credit sales create entries when receivables are registered:
+
+```php
+public function createReceivable(array $data): Receivable
+{
+    return DB::transaction(function () use ($data) {
+        // Generate journal entry
+        $entry = $this->journalService->create([
+            'entry_date'  => $data['emission_date'],
+            'reference'   => $data['document_number'],
+            'description' => "Registro CxC: {$data['document_number']}",
+            'status'      => JournalEntry::STATUS_POSTED,
+            'items'       => [
+                [
+                    'accounting_account_id' => $this->getAccountIdByCode('1.1.02'),
+                    'debit'  => $data['total_amount'],
+                    'credit' => 0,
+                    'note'   => "Cargo de deuda"
+                ],
+                [
+                    'accounting_account_id' => $this->getAccountIdByCode('4.1'),
+                    'debit'  => 0,
+                    'credit' => $data['total_amount'],
+                    'note'   => "Contrapartida de ingreso"
+                ]
+            ]
+        ]);
+
+        // Create receivable with journal reference
+        return Receivable::create([
+            'journal_entry_id' => $entry->id,
+            // ... other fields ...
+        ]);
+    });
+}
+```
+
+**Accounting Effect:**
+```
+Debit:  1.1.02 - Cuentas por Cobrar    $1,500.00
+Credit: 4.1    - Ingresos              $1,500.00
+```
+
+### Payment Collection
+
+Receivable payments generate entries:
+
+```php
+public function createPayment(array $data): Payment
+{
+    return DB::transaction(function () use ($data) {
+        $receivable = Receivable::findOrFail($data['receivable_id']);
+        
+        // Generate journal entry
+        $entry = $this->journalService->create([
+            'entry_date'  => $data['payment_date'],
+            'reference'   => $receiptNumber,
+            'description' => "Pago Recibido: {$receiptNumber}",
+            'status'      => JournalEntry::STATUS_POSTED,
+            'items'       => [
+                [
+                    'accounting_account_id' => $this->getAccountIdByCode('1.1.01'),
+                    'debit'  => $data['amount'],
+                    'credit' => 0,
+                    'note'   => "Cobro según {$receiptNumber}"
+                ],
+                [
+                    'accounting_account_id' => $receivable->accounting_account_id,
+                    'debit'  => 0,
+                    'credit' => $data['amount'],
+                    'note'   => "Aplicación a factura {$receivable->document_number}"
+                ]
+            ]
+        ]);
+
+        // Create payment record
+        return Payment::create([
+            'journal_entry_id' => $entry->id,
+            // ... other fields ...
+        ]);
+    });
+}
+```
+
+**Accounting Effect:**
+```
+Debit:  1.1.01 - Caja                  $500.00
+Credit: 1.1.02 - Cuentas por Cobrar    $500.00
+```
+
+## Updating Journal Entries
+
+### Edit Draft Entries
+
+```php
+public function update(JournalEntry $entry, array $data): JournalEntry
+{
+    return DB::transaction(function () use ($entry, $data) {
+        // Only draft entries can be edited
+        if ($entry->status !== JournalEntry::STATUS_DRAFT) {
+            throw new Exception(
+                "Cannot edit an entry that has been posted or cancelled."
+            );
+        }
+
+        // Validate balance
+        $items = collect($data['items']);
+        $totalDebit = $items->sum('debit');
+        $totalCredit = $items->sum('credit');
+
+        if (abs($totalDebit - $totalCredit) > 0.001) {
+            throw new Exception(
+                "Entry is not balanced. Difference: " . 
+                abs($totalDebit - $totalCredit)
+            );
+        }
+
+        // Update header
+        $entry->update([
+            'entry_date'  => $data['entry_date'],
+            'reference'   => $data['reference'] ?? null,
+            'description' => $data['description'],
+        ]);
+
+        // Sync line items (delete old, create new)
+        $entry->items()->delete();
+
+        foreach ($data['items'] as $item) {
+            $entry->items()->create([
+                'accounting_account_id' => $item['accounting_account_id'],
+                'debit'                 => $item['debit'] ?? 0,
+                'credit'                => $item['credit'] ?? 0,
+                'note'                  => $item['note'] ?? null,
+            ]);
+        }
+
+        return $entry;
+    });
+}
+```
+
+<Warning>
+  Posted entries cannot be edited. Create a reversal entry instead to maintain audit trail.
+</Warning>
+
+## Posting and Cancellation
+
+### Post Entry (Finalize)
+
+```php
+public function post(JournalEntry $entry): bool
+{
+    if ($entry->status !== JournalEntry::STATUS_DRAFT) {
+        throw new Exception("Only draft entries can be posted.");
+    }
+
+    return $entry->update(['status' => JournalEntry::STATUS_POSTED]);
+}
+```
+
+### Cancel Entry
+
+```php
+public function cancel(JournalEntry $entry): bool
+{
+    return $entry->update(['status' => JournalEntry::STATUS_CANCELLED]);
+}
+```
+
+<Info>
+  Cancelled entries remain in the database for audit purposes but are excluded from financial reports.
+</Info>
+
+## Model Helpers
+
+### Calculate Totals
+
+```php
+public function getTotalDebitAttribute()
+{
+    return $this->items->sum('debit');
+}
+
+public function getTotalCreditAttribute()
+{
+    return $this->items->sum('credit');
+}
+```
+
+### Check Balance
+
+```php
+public function isBalanced(): bool
+{
+    return abs($this->total_debit - $this->total_credit) < 0.001;
+}
+```
+
+Usage:
+
+```php
+$entry = JournalEntry::with('items')->find(1);
+
+echo "Total Debit: $" . number_format($entry->total_debit, 2);
+echo "Total Credit: $" . number_format($entry->total_credit, 2);
+
+if ($entry->isBalanced()) {
+    echo "Entry is balanced ✓";
+}
+```
+
+## Relationships
+
+```php
+class JournalEntry extends Model
+{
+    public function items(): HasMany
+    {
+        return $this->hasMany(JournalItem::class);
+    }
+
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
+    }
+}
+
+class JournalItem extends Model
+{
+    public function entry(): BelongsTo
+    {
+        return $this->belongsTo(JournalEntry::class, 'journal_entry_id');
+    }
+
+    public function account(): BelongsTo
+    {
+        return $this->belongsTo(AccountingAccount::class, 'accounting_account_id');
+    }
+}
+```
+
+## Export to Excel
+
+```php
+class JournalEntriesExport implements FromQuery, WithHeadings, WithMapping
+{
+    public function map($entry): array
+    {
+        return [
+            $entry->id,
+            $entry->entry_date->format('d/m/Y'),
+            '#' . str_pad($entry->id, 6, '0', STR_PAD_LEFT),
+            $entry->reference ?? 'N/A',
+            $entry->description,
+            $entry->total_debit,
+            $entry->total_credit,
+            $this->statuses[$entry->status] ?? $entry->status,
+            $entry->creator->name ?? 'Sistema',
+            $entry->created_at->format('d/m/Y H:i'),
+        ];
+    }
+
+    public function headings(): array
+    {
+        return [
+            'ID',
+            'Fecha Contable',
+            'Número de Asiento',
+            'Referencia',
+            'Concepto / Glosa',
+            'Total Débito',
+            'Total Crédito',
+            'Estado',
+            'Registrado por',
+            'Fecha de Creación'
+        ];
+    }
+}
+```
+
+## Common Journal Entry Patterns
+
+### Sale Reversal
+
+```php
+// Original Sale Entry:
+Debit:  1.1.01 - Caja         $1,000
+Credit: 4.1    - Ingresos     $1,000
+
+// Reversal Entry:
+Debit:  4.1    - Ingresos     $1,000
+Credit: 1.1.01 - Caja         $1,000
+```
+
+### Expense Payment
+
+```php
+Debit:  5.1    - Gastos       $500
+Credit: 1.1.01 - Caja         $500
+```
+
+### Asset Purchase
+
+```php
+Debit:  1.2.01 - Equipos      $5,000
+Credit: 1.1.01 - Caja         $5,000
+```
+
+### Bank Transfer
+
+```php
+Debit:  1.1.03 - Banco        $2,000
+Credit: 1.1.01 - Caja         $2,000
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always Validate Balance">
+    Never bypass the debit/credit validation. Even automatic entries should go through the validation logic.
+  </Accordion>
+
+  <Accordion title="Use Descriptive References">
+    Always include source document numbers in the `reference` field for traceability:
+    - Sales: `SALE-00123`
+    - Payments: `PAG-00456`
+    - Reversals: `REV-SALE-00123`
+  </Accordion>
+
+  <Accordion title="Draft Before Posting">
+    For manual entries, create in draft status first, review, then post:
+    ```php
+    $entry = $service->create(['status' => JournalEntry::STATUS_DRAFT, ...]);
+    // Review
+    $service->post($entry);
+    ```
+  </Accordion>
+
+  <Accordion title="Never Delete Posted Entries">
+    Use cancellation or reversal entries instead of deletion to maintain complete audit trail.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+### "Entry is not balanced" Error
+
+**Cause:** Total debits ≠ total credits.
+
+**Solution:**
+```php
+$items = collect($data['items']);
+$totalDebit = $items->sum('debit');
+$totalCredit = $items->sum('credit');
+
+echo "Debit: $totalDebit, Credit: $totalCredit, Diff: " . ($totalDebit - $totalCredit);
+
+// Ensure each line item has either debit OR credit, not both
+foreach ($items as $item) {
+    if ($item['debit'] > 0 && $item['credit'] > 0) {
+        echo "Invalid: Line has both debit and credit";
+    }
+}
+```
+
+### Rounding Errors in Decimal Calculations
+
+**Cause:** Floating point arithmetic imprecision.
+
+**Solution:** Use `bcmath` for precise decimal calculations:
+```php
+$totalDebit = '0';
+foreach ($items as $item) {
+    $totalDebit = bcadd($totalDebit, (string)$item['debit'], 2);
+}
+```
+
+### Cannot Edit Posted Entry
+
+**Cause:** Entry status is `posted` or `cancelled`.
+
+**Solution:** Create a reversal entry:
+```php
+function createReversalEntry(JournalEntry $original): JournalEntry
+{
+    $reversedItems = $original->items->map(function ($item) {
+        return [
+            'accounting_account_id' => $item->accounting_account_id,
+            'debit'  => $item->credit,  // Swap debit and credit
+            'credit' => $item->debit,
+            'note'   => "Reversión: {$item->note}"
+        ];
+    })->toArray();
+
+    return $service->create([
+        'entry_date'  => now(),
+        'reference'   => "REV-{$original->reference}",
+        'description' => "Reversión: {$original->description}",
+        'status'      => JournalEntry::STATUS_POSTED,
+        'items'       => $reversedItems
+    ]);
+}
+```

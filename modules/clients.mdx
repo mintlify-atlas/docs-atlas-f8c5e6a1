@@ -1,0 +1,495 @@
+---
+title: "Clients Module"
+description: "Comprehensive client management with credit tracking, equipment management, and financial controls"
+---
+
+## Overview
+
+The Clients module manages all customer information, including contact details, credit limits, equipment tracking, and financial relationships. It integrates with Sales, Accounting, and Equipment modules for complete customer lifecycle management.
+
+<CardGroup cols={3}>
+  <Card title="Credit Management" icon="credit-card">
+    Credit limits and balance tracking
+  </Card>
+  <Card title="Equipment" icon="truck">
+    Customer equipment registry
+  </Card>
+  <Card title="Financial" icon="chart-line">
+    Sales history and receivables
+  </Card>
+</CardGroup>
+
+## Client Structure
+
+### Core Fields
+
+```php app/Models/Clients/Client.php
+protected $fillable = [
+    'type',                    // individual or company
+    'estado_cliente_id',       // Client status
+    'name',                    // Legal name
+    'commercial_name',         // DBA / trading name
+    'email',
+    'phone',
+    'state_id',                // Geographic state
+    'city',
+    'address',
+    'tax_identifier_type_id',  // RNC, Cédula, etc.
+    'tax_id',                  // Tax ID number
+    // Financial fields
+    'credit_limit',
+    'balance',                 // Current outstanding
+    'payment_terms',           // Days for payment
+    'accounting_account_id',   // Custom A/R account
+];
+```
+
+### Client Types
+
+<Tabs>
+  <Tab title="Individual">
+    Personal customers:
+
+    - Use personal name
+    - Personal tax ID (Cédula)
+    - Lower credit limits typically
+    - Simplified tracking
+
+    ```php
+    Client::create([
+        'type' => 'individual',
+        'name' => 'Juan Pérez',
+        'tax_identifier_type_id' => 1, // Cédula
+        'tax_id' => '001-1234567-8',
+        'credit_limit' => 5000,
+    ]);
+    ```
+  </Tab>
+  <Tab title="Company">
+    Business customers:
+
+    - Legal entity name
+    - Company tax ID (RNC)
+    - `commercial_name` for DBA
+    - Higher credit limits
+    - Equipment tracking
+
+    ```php
+    Client::create([
+        'type' => 'company',
+        'name' => 'ABC Distribución, S.R.L.',
+        'commercial_name' => 'ABC Distribuidora',
+        'tax_identifier_type_id' => 2, // RNC
+        'tax_id' => '1-01-12345-6',
+        'credit_limit' => 50000,
+        'payment_terms' => 30,
+    ]);
+    ```
+  </Tab>
+</Tabs>
+
+## Credit Management
+
+### Credit Limit Validation
+
+Before approving credit sales, validate available credit:
+
+```php app/Http/Requests/Sales/StoreSaleRequest.php
+public function withValidator($validator)
+{
+    $validator->after(function ($validator) {
+        if ($this->payment_type === Sale::PAYMENT_CREDIT) {
+            $client = Client::find($this->client_id);
+            
+            if ($client->balance + $this->total_amount > $client->credit_limit) {
+                $available = $client->credit_limit - $client->balance;
+                $validator->errors()->add(
+                    'total_amount',
+                    "Crédito insuficiente. Disponible: " . 
+                    number_format($available, 2)
+                );
+            }
+        }
+    });
+}
+```
+
+<Warning>
+  Credit sales will be rejected if the sale amount exceeds available credit. Increase the client's credit limit or request cash payment.
+</Warning>
+
+### Balance Tracking
+
+The client's balance is automatically updated:
+
+```php app/Models/Clients/Client.php
+public function refreshBalance(): bool
+{
+    $this->balance = $this->receivables()
+        ->whereIn('status', [
+            Receivable::STATUS_UNPAID,
+            Receivable::STATUS_PARTIAL
+        ])
+        ->sum('current_balance');
+        
+    return $this->save();
+}
+```
+
+**When balance updates:**
+- Credit sale created → Balance increases
+- Payment applied → Balance decreases
+- Receivable canceled → Balance decreases
+
+### Payment Terms
+
+```php
+// 30-day terms
+$client->payment_terms = 30;
+
+// Calculate due date
+$dueDate = $sale->sale_date->copy()->addDays($client->payment_terms);
+```
+
+## Client Status
+
+Track the current state of the client relationship:
+
+```php app/Models/Configuration/EstadosCliente.php
+protected $fillable = [
+    'nombre',        // e.g., "Activo", "Moroso", "Inactivo"
+    'clase_fondo',   // Background color for badge
+    'clase_texto',   // Text color for badge
+];
+```
+
+**Common Statuses:**
+
+<CardGroup cols={2}>
+  <Card title="Active" icon="circle-check">
+    Good standing, can purchase
+  </Card>
+  <Card title="Delinquent" icon="exclamation-triangle">
+    Overdue payments, credit hold
+  </Card>
+  <Card title="Inactive" icon="circle-xmark">
+    No longer doing business
+  </Card>
+  <Card title="Suspended" icon="ban">
+    Administrative hold
+  </Card>
+</CardGroup>
+
+## Equipment Management
+
+Track equipment installed at client locations:
+
+```php app/Models/Clients/Equipment.php
+protected $fillable = [
+    'client_id',
+    'equipment_type_id',
+    'serial_number',
+    'model',
+    'installation_date',
+    'status',            // active, maintenance, retired
+    'notes',
+];
+```
+
+### Use Cases
+
+<AccordionGroup>
+  <Accordion title="Route Sales">
+    Track coolers, display racks, or dispensers at retail locations:
+
+    ```php
+    Equipment::create([
+        'client_id' => $clientId,
+        'equipment_type_id' => 1,  // Cooler
+        'serial_number' => 'COOL-2024-001',
+        'model' => 'Vertical 6ft',
+        'installation_date' => now(),
+        'status' => 'active',
+    ]);
+    ```
+  </Accordion>
+  <Accordion title="Service Contracts">
+    Track machinery or equipment under service:
+
+    - Installation date
+    - Warranty information
+    - Maintenance schedule
+    - Parts inventory
+  </Accordion>
+  <Accordion title="Asset Leasing">
+    Equipment leased to customers:
+
+    - Lease terms
+    - Monthly fees
+    - Return conditions
+    - Depreciation tracking
+  </Accordion>
+</AccordionGroup>
+
+## Point of Sale Locations
+
+Manage multiple POS locations for a single client:
+
+```php app/Models/Clients/PointOfSale.php
+protected $fillable = [
+    'client_id',
+    'name',
+    'code',
+    'address',
+    'phone',
+    'contact_person',
+    'is_active',
+];
+```
+
+**Example:**
+
+```php
+// Main client
+$client = Client::find(1); // "ABC Supermarkets"
+
+// Multiple locations
+PointOfSale::create([
+    'client_id' => $client->id,
+    'name' => 'ABC - Centro',
+    'code' => 'ABC-01',
+    'address' => 'Av. Principal #123',
+]);
+
+PointOfSale::create([
+    'client_id' => $client->id,
+    'name' => 'ABC - Norte',
+    'code' => 'ABC-02',
+    'address' => 'Calle Comercio #456',
+]);
+```
+
+## Business Types
+
+Categorize clients by industry or business model:
+
+```php app/Models/Clients/BusinessType.php
+protected $fillable = [
+    'name',         // e.g., "Restaurant", "Retail", "Wholesale"
+    'description',
+];
+```
+
+**Examples:**
+- Retail Store
+- Supermarket
+- Restaurant
+- Hotel
+- Distributor
+- Government
+- Healthcare
+
+## Relationships
+
+### Sales History
+
+```php
+$client = Client::with('sales')->find($id);
+
+// Total sales
+$totalSales = $client->sales()->sum('total_amount');
+
+// Recent sales
+$recentSales = $client->sales()
+    ->latest()
+    ->take(10)
+    ->get();
+```
+
+### Receivables
+
+```php
+// Outstanding invoices
+$outstanding = $client->receivables()
+    ->whereIn('status', [
+        Receivable::STATUS_UNPAID,
+        Receivable::STATUS_PARTIAL
+    ])
+    ->get();
+
+// Overdue
+$overdue = $client->receivables()
+    ->where('status', Receivable::STATUS_OVERDUE)
+    ->get();
+```
+
+### Payments
+
+```php
+// Payment history
+$payments = $client->payments()
+    ->orderBy('payment_date', 'desc')
+    ->get();
+
+// Total paid this month
+$monthlyPayments = $client->payments()
+    ->whereMonth('payment_date', now()->month)
+    ->sum('amount');
+```
+
+## Accounting Integration
+
+### Custom A/R Accounts
+
+Large clients can have dedicated receivable accounts:
+
+```php
+$client->accounting_account_id = 25; // "1.1.02.01 - ABC Company A/R"
+$client->save();
+```
+
+**Benefits:**
+- Separate tracking in trial balance
+- Custom reporting
+- Better visibility
+
+```php app/Models/Clients/Client.php
+public function hasCustomAccount(): bool
+{
+    return !is_null($this->accounting_account_id);
+}
+```
+
+### Default Account Fallback
+
+```php
+if ($client->hasCustomAccount()) {
+    $arAccount = $client->accountingAccount;
+} else {
+    $arAccount = AccountingAccount::where('code', '1.1.02')->first();
+}
+```
+
+## Queries & Reports
+
+### Clients by Credit Usage
+
+```php
+$highRisk = Client::whereColumn('balance', '>', DB::raw('credit_limit * 0.8'))
+    ->get();
+
+foreach ($highRisk as $client) {
+    $usage = ($client->balance / $client->credit_limit) * 100;
+    echo "{$client->name}: {$usage}% credit usage\n";
+}
+```
+
+### Top Customers by Sales
+
+```php
+$topClients = Client::withSum('sales as total_sales', 'total_amount')
+    ->orderByDesc('total_sales')
+    ->take(20)
+    ->get();
+```
+
+### Aging Analysis
+
+```php
+$aging = Client::select([
+    'clients.*',
+    DB::raw('SUM(CASE WHEN DATEDIFF(NOW(), receivables.due_date) <= 0 THEN receivables.current_balance ELSE 0 END) as current'),
+    DB::raw('SUM(CASE WHEN DATEDIFF(NOW(), receivables.due_date) BETWEEN 1 AND 30 THEN receivables.current_balance ELSE 0 END) as days_1_30'),
+    DB::raw('SUM(CASE WHEN DATEDIFF(NOW(), receivables.due_date) > 30 THEN receivables.current_balance ELSE 0 END) as over_30'),
+])
+->join('receivables', 'receivables.client_id', '=', 'clients.id')
+->whereIn('receivables.status', ['unpaid', 'partial', 'overdue'])
+->groupBy('clients.id')
+->get();
+```
+
+## Client Portal (Future)
+
+Potential features for client self-service:
+
+- View account balance
+- Download invoices
+- Make online payments
+- Track order history
+- Request quotes
+- Update contact information
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Set Realistic Credit Limits">
+    Base credit limits on:
+    - Purchase history
+    - Payment behavior
+    - Business size
+    - Industry risk
+
+    ```php
+    // Start conservative
+    $newClient->credit_limit = 5000;
+
+    // Increase based on performance
+    if ($client->payment_score > 90) {
+        $client->credit_limit *= 1.5;
+    }
+    ```
+  </Accordion>
+  <Accordion title="Regular Balance Reconciliation">
+    Periodically verify that client balances match receivables:
+
+    ```php
+    foreach (Client::all() as $client) {
+        $calculated = $client->receivables()
+            ->whereIn('status', ['unpaid', 'partial'])
+            ->sum('current_balance');
+
+        if (abs($client->balance - $calculated) > 0.01) {
+            $client->refreshBalance();
+        }
+    }
+    ```
+  </Accordion>
+  <Accordion title="Monitor Credit Utilization">
+    Alert when clients approach credit limits:
+
+    ```php
+    $utilization = ($client->balance / $client->credit_limit) * 100;
+
+    if ($utilization > 80) {
+        // Send alert
+        // Consider increasing limit
+        // Or restrict new sales
+    }
+    ```
+  </Accordion>
+  <Accordion title="Track Equipment Serial Numbers">
+    Always record serial numbers for equipment:
+
+    - Warranty claims
+    - Theft recovery
+    - Maintenance tracking
+    - Audit compliance
+  </Accordion>
+</AccordionGroup>
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Sales Module" icon="chart-line" href="/modules/sales">
+    Creating sales for clients
+  </Card>
+  <Card title="Receivables" icon="money-bill-trend-up" href="/features/receivables">
+    Credit sales tracking
+  </Card>
+  <Card title="Client Model API" icon="code" href="/api/models/client">
+    Model reference
+  </Card>
+  <Card title="Accounting" icon="calculator" href="/modules/accounting">
+    Financial integration
+  </Card>
+</CardGroup>

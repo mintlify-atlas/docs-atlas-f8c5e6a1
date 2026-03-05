@@ -1,0 +1,237 @@
+---
+title: Introduction
+description: Welcome to Gestión de Ventas - A comprehensive Laravel-based ERP system for managing sales, inventory, accounting, and customer relationships
+---
+
+## What is Gestión de Ventas?
+
+Gestión de Ventas is a modern, full-featured ERP (Enterprise Resource Planning) system built with Laravel 12 and designed specifically for businesses that need to manage sales operations, inventory control, accounting, and customer relationships in a single, integrated platform.
+
+<Note>
+  This system follows a **modular architecture** with clear separation of concerns, making it maintainable, testable, and scalable for businesses of any size.
+</Note>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Sales Management" icon="cash-register">
+    Complete point-of-sale (POS) system with support for cash and credit sales, NCF (Dominican fiscal) integration, and automatic invoice generation.
+  </Card>
+  
+  <Card title="Inventory Control" icon="boxes-stacked">
+    Multi-warehouse inventory tracking with automatic stock adjustments, movement history, and real-time stock validation.
+  </Card>
+  
+  <Card title="Accounting Integration" icon="calculator">
+    Automated journal entries, accounts receivable management, and double-entry bookkeeping with full audit trail.
+  </Card>
+  
+  <Card title="Customer Management" icon="users">
+    Comprehensive client profiles with credit limits, payment history, and credit status tracking.
+  </Card>
+</CardGroup>
+
+## Architecture Highlights
+
+The system is built following Laravel best practices and implements a **layered architecture** that ensures:
+
+### Skinny Controllers Pattern
+
+Controllers act as orchestrators, delegating business logic to dedicated service classes:
+
+```php
+public function store(StoreSaleRequest $request, SaleService $service)
+{
+    // Controller only coordinates - no business logic here
+    $sale = $service->create($request->validated());
+    
+    return redirect()
+        ->route('sales.index')
+        ->with('success', "Venta #{$sale->number} registrada con éxito.");
+}
+```
+
+### Service Layer Architecture
+
+Business logic is encapsulated in service classes:
+
+- **CatalogService**: Provides dropdown data for forms and filters
+- **BusinessService**: Handles create, update, and bulk operations
+- **Transactional Integrity**: All complex operations wrapped in database transactions
+
+### Pipeline Pattern for Filtering
+
+Filters are implemented as independent, reusable classes:
+
+```php
+$sales = (new SaleFilters($request))
+    ->apply(Sale::query()->withIndexRelations())
+    ->latest()
+    ->paginate($perPage);
+```
+
+### Form Request Validation
+
+All validation and authorization happens before reaching the controller:
+
+```php
+public function authorize(): bool
+{
+    return $this->user()->can('create sales');
+}
+```
+
+## Technology Stack
+
+<CardGroup cols={2}>
+  <Card title="Backend" icon="server">
+    - **Laravel 12** - PHP framework
+    - **PHP 8.2+** - Modern PHP features
+    - **SQLite/MySQL** - Database flexibility
+    - **Spatie Permissions** - Role-based access control
+  </Card>
+  
+  <Card title="Frontend" icon="window">
+    - **Blade Templates** - Server-side rendering
+    - **Alpine.js** - Reactive components
+    - **Tailwind CSS** - Utility-first styling
+    - **Vite** - Fast build tooling
+  </Card>
+</CardGroup>
+
+### Key Dependencies
+
+The system leverages battle-tested Laravel packages:
+
+| Package | Purpose |
+|---------|--------|
+| `spatie/laravel-permission` | Role and permission management |
+| `maatwebsite/excel` | Excel import/export functionality |
+| `barryvdh/laravel-dompdf` | PDF generation for invoices |
+| `laravel/breeze` | Authentication scaffolding |
+
+## Core Modules
+
+### Sales Module
+
+Handles the complete sales workflow from product selection to invoice generation:
+
+- Point-of-sale interface
+- Cash and credit payment types
+- NCF (fiscal numbering) integration for Dominican Republic compliance
+- Automatic inventory deduction
+- Invoice generation and printing
+
+**Key Files:**
+- `app/Models/Sales/Sale.php` - Sale model with relationships
+- `app/Http/Controllers/Sales/SaleController.php` - Sales orchestration
+- `app/Services/Sales/SalesServices/SaleService.php` - Sales business logic
+
+### Inventory Module
+
+Tracks product stock across multiple warehouses:
+
+- Real-time stock levels
+- Automatic movement tracking (inputs, outputs, adjustments)
+- Stock validation before sales
+- Movement history and audit trail
+
+### Accounting Module
+
+Maintains financial records with automated posting:
+
+- Chart of accounts management
+- Automatic journal entries for sales
+- Accounts receivable tracking
+- Payment recording and reconciliation
+- Full audit trail with reversals for cancellations
+
+### Client Management
+
+Comprehensive customer relationship management:
+
+- Client profiles with tax IDs (RNC)
+- Credit limits and balance tracking
+- Client status categories (active, blocked, restricted)
+- Payment history
+- Credit eligibility validation
+
+## Design Principles
+
+<Steps>
+  <Step title="Separation of Concerns">
+    Each layer has a single, well-defined responsibility:
+    - **Models**: Data persistence and relationships
+    - **Services**: Business logic and transactions
+    - **Controllers**: Request handling and response
+    - **Form Requests**: Validation and authorization
+  </Step>
+  
+  <Step title="Reusability">
+    Code is DRY (Don't Repeat Yourself):
+    - Shared filter classes
+    - Centralized catalog services
+    - Reusable table configurations
+  </Step>
+  
+  <Step title="Testability">
+    Clean architecture enables easy testing:
+    - Service classes are unit testable
+    - Controllers are integration testable
+    - Business logic isolated from framework
+  </Step>
+  
+  <Step title="Maintainability">
+    Clear structure makes the codebase easy to navigate:
+    - Consistent naming conventions
+    - Documented service methods
+    - Type-hinted dependencies
+  </Step>
+</Steps>
+
+## Security Features
+
+<Warning>
+  The system implements multiple security layers to protect your business data.
+</Warning>
+
+- **Permission-based access control** via Spatie Permissions package
+- **Form Request validation** ensures only authorized users access resources
+- **Soft deletes** preserve data integrity and audit trail
+- **Database transactions** ensure data consistency
+- **CSRF protection** on all state-changing operations
+- **Password hashing** with Laravel's bcrypt
+
+## Multi-tenancy Ready
+
+The system supports country-based operations:
+
+- Geographic data (countries, states, municipalities)
+- Country-specific configurations
+- Localized tax settings
+- Multi-currency support foundation
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Get the system up and running in minutes with our step-by-step installation guide.
+  </Card>
+  
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Learn how to create your first sale and explore the core features.
+  </Card>
+</CardGroup>
+
+## Getting Help
+
+If you encounter any issues or have questions:
+
+1. Check the [Architecture Documentation](/home/daytona/workspace/source/ARCHITECTURE.md) for design patterns
+2. Review the code comments in service classes
+3. Examine the validation rules in Form Request classes
+4. Look at existing modules as examples for creating new features
+
+<Note>
+  This documentation is based on the actual codebase. All code examples are real and can be found in the source files referenced.
+</Note>

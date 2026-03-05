@@ -1,0 +1,504 @@
+---
+title: 'Inventory'
+description: 'Models for managing inventory stock and movements across warehouses'
+---
+
+## Overview
+
+The inventory management system consists of two main models: `InventoryStock` for tracking current stock levels and `InventoryMovement` for recording all inventory transactions.
+
+## InventoryStock Model
+
+Tracks current stock quantities for each product in each warehouse.
+
+**Namespace:** `App\Models\Inventory\InventoryStock`
+
+**Database Table:** `inventory_stocks`
+
+**Traits:** `HasFactory`
+
+### Properties
+
+<ParamField path="warehouse_id" type="integer" required>
+  Foreign key to the Warehouse model
+</ParamField>
+
+<ParamField path="product_id" type="integer" required>
+  Foreign key to the Product model
+</ParamField>
+
+<ParamField path="quantity" type="integer" required>
+  Current quantity in stock
+</ParamField>
+
+<ParamField path="min_stock" type="integer">
+  Minimum stock level threshold for low stock alerts
+</ParamField>
+
+### Relationships
+
+#### warehouse()
+
+<ResponseField name="warehouse" type="BelongsTo">
+  Returns the warehouse where this stock is located
+</ResponseField>
+
+```php
+$stock->warehouse; // Warehouse object
+$stock->warehouse->name; // Warehouse name
+```
+
+#### product()
+
+<ResponseField name="product" type="BelongsTo">
+  Returns the product this stock record represents
+</ResponseField>
+
+```php
+$stock->product; // Product object
+$stock->product->name; // Product name
+$stock->product->sku; // Product SKU
+```
+
+### Usage Examples
+
+#### Checking Stock Levels
+
+```php
+use App\Models\Inventory\InventoryStock;
+
+// Get stock for a product in a specific warehouse
+$stock = InventoryStock::where('product_id', $productId)
+    ->where('warehouse_id', $warehouseId)
+    ->first();
+
+if ($stock && $stock->quantity > 0) {
+    echo "Available: {$stock->quantity}";
+} else {
+    echo "Out of stock";
+}
+```
+
+#### Low Stock Alerts
+
+```php
+// Get all low stock items
+$lowStockItems = InventoryStock::whereRaw('quantity <= min_stock')
+    ->with(['product', 'warehouse'])
+    ->get();
+
+foreach ($lowStockItems as $item) {
+    echo "{$item->product->name} is low in {$item->warehouse->name}";
+    echo "Current: {$item->quantity}, Minimum: {$item->min_stock}";
+}
+```
+
+#### Stock by Warehouse
+
+```php
+// Get all products in a warehouse
+$warehouseStock = InventoryStock::where('warehouse_id', $warehouseId)
+    ->with('product')
+    ->where('quantity', '>', 0)
+    ->get();
+
+// Calculate total inventory value
+$totalValue = $warehouseStock->sum(function ($stock) {
+    return $stock->quantity * $stock->product->cost;
+});
+```
+
+---
+
+## InventoryMovement Model
+
+Records all inventory transactions including inputs, outputs, adjustments, and transfers.
+
+**Namespace:** `App\Models\Inventory\InventoryMovement`
+
+**Database Table:** `inventory_movements`
+
+**Traits:** `SoftDeletes`
+
+### Properties
+
+<ParamField path="warehouse_id" type="integer" required>
+  Foreign key to the source warehouse
+</ParamField>
+
+<ParamField path="to_warehouse_id" type="integer">
+  Foreign key to destination warehouse (for transfers only)
+</ParamField>
+
+<ParamField path="product_id" type="integer" required>
+  Foreign key to the Product model
+</ParamField>
+
+<ParamField path="user_id" type="integer" required>
+  Foreign key to the User who created the movement
+</ParamField>
+
+<ParamField path="quantity" type="integer" required>
+  Quantity moved (positive for inputs, negative for outputs)
+</ParamField>
+
+<ParamField path="type" type="string" required>
+  Movement type: 'input', 'output', 'adjustment', or 'transfer'
+</ParamField>
+
+<ParamField path="previous_stock" type="integer">
+  Stock level before this movement (audit trail)
+</ParamField>
+
+<ParamField path="current_stock" type="integer">
+  Stock level after this movement (audit trail)
+</ParamField>
+
+<ParamField path="description" type="text">
+  Description or reason for the movement
+</ParamField>
+
+<ParamField path="reference_type" type="string">
+  Polymorphic type for the related document (Sale, Purchase, etc.)
+</ParamField>
+
+<ParamField path="reference_id" type="integer">
+  Polymorphic ID for the related document
+</ParamField>
+
+### Constants
+
+```php
+const TYPE_INPUT = 'input';
+const TYPE_OUTPUT = 'output';
+const TYPE_ADJUSTMENT = 'adjustment';
+const TYPE_TRANSFER = 'transfer';
+```
+
+### Relationships
+
+#### warehouse()
+
+<ResponseField name="warehouse" type="BelongsTo">
+  Returns the source warehouse
+</ResponseField>
+
+```php
+$movement->warehouse; // Source Warehouse object
+```
+
+#### toWarehouse()
+
+<ResponseField name="toWarehouse" type="BelongsTo">
+  Returns the destination warehouse (for transfers)
+</ResponseField>
+
+```php
+$movement->toWarehouse; // Destination Warehouse object (or null)
+```
+
+#### user()
+
+<ResponseField name="user" type="BelongsTo">
+  Returns the user who created the movement
+</ResponseField>
+
+```php
+$movement->user; // User object
+$movement->user->name; // User name
+```
+
+#### product()
+
+<ResponseField name="product" type="BelongsTo">
+  Returns the product being moved
+</ResponseField>
+
+```php
+$movement->product; // Product object
+```
+
+#### reference()
+
+<ResponseField name="reference" type="MorphTo">
+  Returns the related document (Sale, Purchase, etc.)
+</ResponseField>
+
+```php
+$movement->reference; // Could be Sale, Purchase, or other model
+```
+
+### Accessors
+
+#### typeLabel
+
+Returns human-readable label for the movement type.
+
+```php
+$movement->typeLabel; // 'Entrada', 'Salida', 'Ajuste', or 'Transferencia'
+```
+
+### Scopes
+
+#### withIndexRelations()
+
+Eager loads all relationships for list views.
+
+```php
+InventoryMovement::withIndexRelations()->get();
+```
+
+This scope loads:
+- `warehouse`
+- `toWarehouse`
+- `user`
+- `product`
+- `reference`
+
+### Static Methods
+
+#### getTypes()
+
+Returns array of movement types with labels.
+
+```php
+InventoryMovement::getTypes();
+// Returns:
+// [
+//   'input' => 'Entrada',
+//   'output' => 'Salida',
+//   'adjustment' => 'Ajuste',
+//   'transfer' => 'Transferencia'
+// ]
+```
+
+### Usage Examples
+
+#### Recording an Input
+
+```php
+use App\Models\Inventory\InventoryMovement;
+
+$movement = InventoryMovement::create([
+    'warehouse_id' => $warehouseId,
+    'product_id' => $productId,
+    'user_id' => auth()->id(),
+    'quantity' => 100,
+    'type' => InventoryMovement::TYPE_INPUT,
+    'previous_stock' => $currentStock,
+    'current_stock' => $currentStock + 100,
+    'description' => 'Purchase order receipt',
+    'reference_type' => 'App\\Models\\Purchases\\Purchase',
+    'reference_id' => $purchase->id
+]);
+```
+
+#### Recording an Output (Sale)
+
+```php
+$movement = InventoryMovement::create([
+    'warehouse_id' => $warehouseId,
+    'product_id' => $productId,
+    'user_id' => auth()->id(),
+    'quantity' => -10, // Negative for outputs
+    'type' => InventoryMovement::TYPE_OUTPUT,
+    'previous_stock' => $currentStock,
+    'current_stock' => $currentStock - 10,
+    'description' => 'Sale to customer',
+    'reference_type' => 'App\\Models\\Sales\\Sale',
+    'reference_id' => $sale->id
+]);
+```
+
+#### Recording a Transfer
+
+```php
+$movement = InventoryMovement::create([
+    'warehouse_id' => $fromWarehouseId,
+    'to_warehouse_id' => $toWarehouseId,
+    'product_id' => $productId,
+    'user_id' => auth()->id(),
+    'quantity' => 50,
+    'type' => InventoryMovement::TYPE_TRANSFER,
+    'previous_stock' => $currentStock,
+    'current_stock' => $currentStock - 50,
+    'description' => 'Transfer to branch warehouse'
+]);
+```
+
+#### Recording an Adjustment
+
+```php
+// Stock count revealed discrepancy
+$expectedStock = 100;
+$actualStock = 95;
+$adjustment = $actualStock - $expectedStock; // -5
+
+$movement = InventoryMovement::create([
+    'warehouse_id' => $warehouseId,
+    'product_id' => $productId,
+    'user_id' => auth()->id(),
+    'quantity' => $adjustment,
+    'type' => InventoryMovement::TYPE_ADJUSTMENT,
+    'previous_stock' => $expectedStock,
+    'current_stock' => $actualStock,
+    'description' => 'Physical inventory adjustment - damaged units'
+]);
+```
+
+#### Querying Movement History
+
+```php
+// Get all movements for a product
+$productHistory = InventoryMovement::where('product_id', $productId)
+    ->withIndexRelations()
+    ->orderBy('created_at', 'desc')
+    ->get();
+
+foreach ($productHistory as $movement) {
+    echo $movement->typeLabel;
+    echo $movement->quantity;
+    echo $movement->warehouse->name;
+    echo $movement->user->name;
+}
+```
+
+#### Filtering by Movement Type
+
+```php
+// Get all inputs this month
+$inputs = InventoryMovement::where('type', InventoryMovement::TYPE_INPUT)
+    ->whereMonth('created_at', now()->month)
+    ->with('product', 'warehouse')
+    ->get();
+
+// Get all transfers between specific warehouses
+$transfers = InventoryMovement::where('type', InventoryMovement::TYPE_TRANSFER)
+    ->where('warehouse_id', $fromWarehouse)
+    ->where('to_warehouse_id', $toWarehouse)
+    ->get();
+```
+
+#### Movement Audit Trail
+
+```php
+// Get movement history with audit data
+$movements = InventoryMovement::where('product_id', $productId)
+    ->where('warehouse_id', $warehouseId)
+    ->orderBy('created_at', 'desc')
+    ->get();
+
+foreach ($movements as $movement) {
+    echo "Previous: {$movement->previous_stock}";
+    echo "Change: {$movement->quantity}";
+    echo "Current: {$movement->current_stock}";
+    echo "By: {$movement->user->name}";
+    echo "Date: {$movement->created_at}";
+}
+```
+
+#### Movement Reports
+
+```php
+// Daily movement summary
+$dailySummary = InventoryMovement::whereDate('created_at', today())
+    ->selectRaw('type, COUNT(*) as count, SUM(ABS(quantity)) as total_quantity')
+    ->groupBy('type')
+    ->get();
+
+// Product movement by warehouse
+$warehouseMovements = InventoryMovement::where('product_id', $productId)
+    ->selectRaw('warehouse_id, type, SUM(quantity) as total')
+    ->groupBy('warehouse_id', 'type')
+    ->with('warehouse')
+    ->get();
+```
+
+#### Related Document Access
+
+```php
+// Access the related sale or purchase
+if ($movement->reference_type === 'App\\Models\\Sales\\Sale') {
+    $sale = $movement->reference; // Polymorphic relationship
+    echo "Related to Sale: {$sale->number}";
+}
+```
+
+---
+
+## Complete Inventory Flow Example
+
+### Receiving Products (Input)
+
+```php
+use App\Models\Inventory\InventoryStock;
+use App\Models\Inventory\InventoryMovement;
+use Illuminate\Support\Facades\DB;
+
+DB::transaction(function () use ($warehouseId, $productId, $quantity, $purchaseId) {
+    // Get or create stock record
+    $stock = InventoryStock::firstOrCreate(
+        [
+            'warehouse_id' => $warehouseId,
+            'product_id' => $productId
+        ],
+        ['quantity' => 0, 'min_stock' => 10]
+    );
+    
+    $previousStock = $stock->quantity;
+    $stock->quantity += $quantity;
+    $stock->save();
+    
+    // Record the movement
+    InventoryMovement::create([
+        'warehouse_id' => $warehouseId,
+        'product_id' => $productId,
+        'user_id' => auth()->id(),
+        'quantity' => $quantity,
+        'type' => InventoryMovement::TYPE_INPUT,
+        'previous_stock' => $previousStock,
+        'current_stock' => $stock->quantity,
+        'description' => 'Purchase receipt',
+        'reference_type' => 'App\\Models\\Purchases\\Purchase',
+        'reference_id' => $purchaseId
+    ]);
+});
+```
+
+### Processing a Sale (Output)
+
+```php
+DB::transaction(function () use ($warehouseId, $productId, $quantity, $saleId) {
+    $stock = InventoryStock::where('warehouse_id', $warehouseId)
+        ->where('product_id', $productId)
+        ->firstOrFail();
+    
+    if ($stock->quantity < $quantity) {
+        throw new \Exception('Insufficient stock');
+    }
+    
+    $previousStock = $stock->quantity;
+    $stock->quantity -= $quantity;
+    $stock->save();
+    
+    InventoryMovement::create([
+        'warehouse_id' => $warehouseId,
+        'product_id' => $productId,
+        'user_id' => auth()->id(),
+        'quantity' => -$quantity,
+        'type' => InventoryMovement::TYPE_OUTPUT,
+        'previous_stock' => $previousStock,
+        'current_stock' => $stock->quantity,
+        'description' => 'Sale to customer',
+        'reference_type' => 'App\\Models\\Sales\\Sale',
+        'reference_id' => $saleId
+    ]);
+});
+```
+
+## Related Models
+
+- [Product](/api/models/product) - Products being tracked
+- [Warehouse](/api/models/warehouse) - Storage locations
+- [Sale](/api/models/sale) - Sales that reduce inventory
+- [User](/api/models/user) - Users making movements

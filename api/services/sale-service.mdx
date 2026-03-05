@@ -1,0 +1,377 @@
+---
+title: 'SaleService'
+description: 'Core service for managing sales transactions, including cash and credit sales with full accounting integration'
+icon: 'cart-shopping'
+---
+
+## Overview
+
+The `SaleService` class handles the complete lifecycle of sales transactions in the ERP system. It orchestrates inventory movements, journal entries, receivables, invoicing, and NCF (fiscal control number) generation in a single atomic transaction.
+
+**Namespace:** `App\Services\Sales\SalesServices\SaleService`
+
+**Location:** `app/Services/Sales/SalesServices/SaleService.php`
+
+## Dependencies
+
+The service is constructed with the following dependencies injected via Laravel's dependency injection:
+
+- `InventoryMovementService` - Manages inventory stock movements
+- `JournalEntryService` - Creates accounting journal entries
+- `ReceivableService` - Handles accounts receivable for credit sales
+- `InvoiceService` - Generates invoices from sales
+- `NcfGeneratorInterface` - Generates fiscal control numbers (NCF)
+
+## Methods
+
+### create()
+
+Creates a new sale transaction with all related entities (items, inventory movements, accounting entries, and receivables).
+
+```php
+public function create(array $data): Sale
+```
+
+<ParamField path="data" type="array" required>
+  Sale data array with the following structure:
+  
+  <Expandable title="data properties">
+    <ParamField path="client_id" type="int" required>
+      The ID of the client making the purchase
+    </ParamField>
+    
+    <ParamField path="warehouse_id" type="int" required>
+      The warehouse from which products are sold
+    </ParamField>
+    
+    <ParamField path="total_amount" type="float" required>
+      Total sale amount
+    </ParamField>
+    
+    <ParamField path="payment_type" type="string" required>
+      Payment type: `'cash'` or `'credit'`
+    </ParamField>
+    
+    <ParamField path="items" type="array" required>
+      Array of sale items, each containing:
+      - `product_id` (int): Product ID
+      - `quantity` (int): Quantity sold
+      - `price` (float): Unit price
+    </ParamField>
+    
+    <ParamField path="sale_date" type="string" optional>
+      Sale date (Carbon parseable format). Defaults to current date/time
+    </ParamField>
+    
+    <ParamField path="tipo_pago_id" type="int" optional>
+      Payment method ID (required for cash sales)
+    </ParamField>
+    
+    <ParamField path="cash_received" type="float" optional>
+      Cash amount received (for cash sales)
+    </ParamField>
+    
+    <ParamField path="cash_change" type="float" optional>
+      Change returned to customer (for cash sales)
+    </ParamField>
+    
+    <ParamField path="ncf_type_id" type="int" optional>
+      NCF type ID for fiscal control number generation
+    </ParamField>
+    
+    <ParamField path="notes" type="string" optional>
+      Additional notes for the sale
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="return" type="Sale">
+  Returns the created Sale model with all relationships loaded
+</ResponseField>
+
+**Transaction Flow:**
+
+1. **Document Number Generation** - Generates next sequential sale number from DocumentType
+2. **Sale Record Creation** - Creates the sale record with status `'completed'`
+3. **NCF Generation** - If `ncf_type_id` provided, generates fiscal control number
+4. **Sale Items Creation** - Creates all sale item records
+5. **Inventory Movements** - Registers output movements for each product
+6. **Accounting Treatment:**
+   - **Cash Sales:** Creates immediate journal entry (Debit: Cash Account, Credit: Income Account 4.1)
+   - **Credit Sales:** Creates receivable record with 30-day due date
+7. **Invoice Generation** - Creates corresponding invoice record
+
+#### Example Usage
+
+```php
+use App\Services\Sales\SalesServices\SaleService;
+
+public function __construct(
+    protected SaleService $saleService
+) {}
+
+public function processSale()
+{
+    $sale = $this->saleService->create([
+        'client_id' => 1,
+        'warehouse_id' => 1,
+        'total_amount' => 250.00,
+        'payment_type' => 'cash',
+        'tipo_pago_id' => 1,
+        'cash_received' => 300.00,
+        'cash_change' => 50.00,
+        'sale_date' => now(),
+        'items' => [
+            [
+                'product_id' => 10,
+                'quantity' => 2,
+                'price' => 75.00,
+            ],
+            [
+                'product_id' => 15,
+                'quantity' => 1,
+                'price' => 100.00,
+            ],
+        ],
+        'ncf_type_id' => 1,
+        'notes' => 'Sale processed from POS terminal 3',
+    ]);
+
+    return $sale;
+}
+```
+
+```php
+// Credit sale example
+$creditSale = $this->saleService->create([
+    'client_id' => 5,
+    'warehouse_id' => 1,
+    'total_amount' => 1500.00,
+    'payment_type' => 'credit',
+    'items' => [
+        [
+            'product_id' => 20,
+            'quantity' => 5,
+            'price' => 300.00,
+        ],
+    ],
+]);
+```
+
+---
+
+### cancel()
+
+Cancels an existing sale and reverses all related accounting, inventory, and receivable transactions.
+
+```php
+public function cancel(Sale $sale, ?string $reason = null): bool
+```
+
+<ParamField path="sale" type="Sale" required>
+  The Sale model instance to cancel
+</ParamField>
+
+<ParamField path="reason" type="string" optional>
+  Cancellation reason for audit trail. Defaults to "Anulación de venta manual"
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if cancellation was successful
+</ResponseField>
+
+**Validation Rules:**
+- Sale must not already be cancelled
+- For credit sales, the receivable must not have any payments applied
+- If receivable has partial payments, throws exception: "No se puede anular: El cliente ya tiene abonos."
+
+**Reversal Process:**
+
+1. **Receivable Cancellation** - For credit sales, cancels the receivable if no payments exist
+2. **NCF Status Update** - Updates NCF log status to `'voided'` with cancellation reason
+3. **Accounting Reversal** - Creates reversal journal entry:
+   - Debit: Income Account (4.1)
+   - Credit: Cash/Receivable Account (depending on original payment type)
+4. **Inventory Reversal** - Creates adjustment movements to restore stock
+5. **Invoice Cancellation** - Marks related invoice as cancelled
+6. **Sale Status Update** - Sets sale status to `'canceled'`
+
+#### Example Usage
+
+```php
+use App\Models\Sales\Sale;
+use App\Services\Sales\SalesServices\SaleService;
+
+public function __construct(
+    protected SaleService $saleService
+) {}
+
+public function cancelSale($saleId)
+{
+    $sale = Sale::findOrFail($saleId);
+    
+    try {
+        $result = $this->saleService->cancel(
+            $sale,
+            'Customer requested cancellation - duplicate order'
+        );
+        
+        if ($result) {
+            return response()->json([
+                'message' => 'Sale cancelled successfully',
+                'sale_number' => $sale->number,
+            ]);
+        }
+    } catch (\Exception $e) {
+        return response()->json([
+            'error' => $e->getMessage()
+        ], 400);
+    }
+}
+```
+
+---
+
+## Protected Methods
+
+These methods are used internally by the service and are not meant to be called directly.
+
+### generateSaleAccountingEntry()
+
+Generates the accounting journal entry for cash sales.
+
+```php
+protected function generateSaleAccountingEntry(Sale $sale)
+```
+
+**Accounting Logic:**
+- Debits the payment method's accounting account (or default 1.1.01 Cash)
+- Credits Income Account 4.1 (Sales Revenue)
+- Description format: "Venta Contado ({payment_method_name}) - {client_name}"
+- Status: `'posted'` (immediately posted)
+
+**Source Code Reference:** `SaleService.php:147-169`
+
+---
+
+### generateCancellationAccountingEntry()
+
+Generates the reversal accounting journal entry when cancelling a sale.
+
+```php
+protected function generateCancellationAccountingEntry(Sale $sale)
+```
+
+**Accounting Logic:**
+- Debits Income Account 4.1 (reverses revenue recognition)
+- Credits:
+  - Cash Account (1.1.01) for cash sales
+  - Client's accounting account or default Receivable Account (1.1.02) for credit sales
+- Reference format: "REV-{sale_number}"
+- Description: "Anulación Venta {sale_number}"
+
+**Source Code Reference:** `SaleService.php:171-191`
+
+---
+
+## Sale Model Constants
+
+### Payment Types
+
+```php
+Sale::PAYMENT_CASH   // 'cash'
+Sale::PAYMENT_CREDIT // 'credit'
+```
+
+### Status Constants
+
+```php
+Sale::STATUS_COMPLETED // 'completed'
+Sale::STATUS_CANCELED  // 'canceled'
+```
+
+---
+
+## Exception Handling
+
+The service may throw exceptions in the following scenarios:
+
+<AccordionGroup>
+  <Accordion title="Configuration Errors">
+    **Exception:** `"Configuración contable incompleta."`
+    
+    **Cause:** Missing required accounting accounts (Income Account 4.1 or Cash Account 1.1.01)
+    
+    **Resolution:** Ensure all required accounting accounts are configured in the system
+  </Accordion>
+
+  <Accordion title="Already Cancelled">
+    **Exception:** `"La venta ya se encuentra anulada."`
+    
+    **Cause:** Attempting to cancel a sale that is already cancelled
+    
+    **Resolution:** Check sale status before attempting cancellation
+  </Accordion>
+
+  <Accordion title="Receivable Has Payments">
+    **Exception:** `"No se puede anular: El cliente ya tiene abonos."`
+    
+    **Cause:** Attempting to cancel a credit sale that has received partial or full payment
+    
+    **Resolution:** Payments must be reversed before sale cancellation, or use a different business process for handling paid invoices
+  </Accordion>
+
+  <Accordion title="Insufficient Stock">
+    **Cause:** Product quantity exceeds available warehouse stock during sale creation
+    
+    **Resolution:** Thrown by InventoryMovementService - verify stock availability before processing sale
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Integration Points
+
+### InventoryMovementService
+
+- **On Sale Creation:** Registers `TYPE_OUTPUT` movements for each product
+- **On Sale Cancellation:** Registers `TYPE_ADJUSTMENT` movements to restore inventory
+- See [InventoryMovementService](/api/services/inventory-movement-service) for details
+
+### JournalEntryService
+
+- **Cash Sales:** Creates posted journal entries for immediate revenue recognition
+- **Sale Cancellation:** Creates reversal entries to negate original transaction
+- See [JournalEntryService](/api/services/journal-entry-service) for details
+
+### ReceivableService
+
+- **Credit Sales:** Creates receivable records with 30-day due date
+- **Cancellation:** Cancels receivables if no payments have been applied
+- See [ReceivableService](/api/services/receivable-service) for details
+
+### InvoiceService
+
+- Creates invoice record from completed sale
+- Cancels invoice when sale is cancelled
+
+### NcfGeneratorInterface
+
+- Generates fiscal control numbers (NCF) when `ncf_type_id` is provided
+- Updates NCF log status on cancellation
+
+---
+
+## Database Transaction Safety
+
+Both `create()` and `cancel()` methods wrap all operations in database transactions using `DB::transaction()`. If any operation fails, all changes are rolled back automatically, ensuring data consistency.
+
+---
+
+## Related Models
+
+- [Sale Model](/api/models/sale) - Main sale entity
+- [SaleItem Model](/api/models/sale-item) - Individual line items
+- [Receivable Model](/api/models/receivable) - Accounts receivable
+- [JournalEntry Model](/api/models/journal-entry) - Accounting entries
+- [InventoryMovement Model](/api/models/inventory-movement) - Inventory tracking

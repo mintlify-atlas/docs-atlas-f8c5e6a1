@@ -1,0 +1,751 @@
+---
+title: 'Creating Custom Filters'
+description: 'Step-by-step guide to building custom query filters for your models'
+icon: 'hammer'
+---
+
+## Overview
+
+Creating custom filters involves three main steps:
+
+1. Create individual filter classes implementing `FilterInterface`
+2. Create a main filter class extending `QueryFilter`
+3. Apply the filters in your controller
+
+This guide will walk you through creating a complete filtering system for a hypothetical "Orders" module.
+
+## Step 1: Create the Main Filter Class
+
+First, create a class that extends `QueryFilter` and maps request parameters to individual filter classes.
+
+```php app/Filters/Orders/OrderFilters.php
+<?php
+
+namespace App\Filters\Orders;
+
+use App\Filters\Base\QueryFilter;
+
+class OrderFilters extends QueryFilter
+{
+    /**
+     * Map request parameters to filter classes
+     * 
+     * Key: The request parameter name
+     * Value: The filter class to handle it
+     */
+    protected function filters(): array
+    {
+        return [
+            'search'       => OrderSearchFilter::class,
+            'customer_id'  => OrderCustomerFilter::class,
+            'status'       => OrderStatusFilter::class,
+            'from_date'    => OrderDateFilter::class,
+            'min_amount'   => OrderAmountFilter::class,
+            'is_urgent'    => OrderUrgentFilter::class,
+        ];
+    }
+}
+```
+
+<Note>
+  The array keys (e.g., `'search'`, `'customer_id'`) must match the query parameter names in your HTTP requests.
+</Note>
+
+## Step 2: Create Individual Filter Classes
+
+Now create each individual filter class. Each must implement `FilterInterface` and contain the specific filtering logic.
+
+### Search Filter
+
+Searches across multiple fields using LIKE queries:
+
+```php app/Filters/Orders/OrderSearchFilter.php
+<?php
+
+namespace App\Filters\Orders;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class OrderSearchFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $value = $this->request->input('search');
+        
+        // Return early if no search value
+        if (!$value) return $query;
+
+        return $query->where(function($q) use ($value) {
+            $q->where('order_number', 'like', "%{$value}%")
+              ->orWhere('reference', 'like', "%{$value}%")
+              ->orWhere('notes', 'like', "%{$value}%")
+              ->orWhereHas('customer', function($subQ) use ($value) {
+                  $subQ->where('name', 'like', "%{$value}%")
+                       ->orWhere('email', 'like', "%{$value}%");
+              });
+        });
+    }
+}
+```
+
+<Tip>
+  Always wrap multiple OR conditions in a closure to prevent query logic issues when combined with other filters.
+</Tip>
+
+### Relationship Filter
+
+Filters by foreign key relationships:
+
+```php app/Filters/Orders/OrderCustomerFilter.php
+<?php
+
+namespace App\Filters\Orders;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class OrderCustomerFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $customerId = $this->request->input('customer_id');
+        
+        return $customerId 
+            ? $query->where('customer_id', $customerId)
+            : $query;
+    }
+}
+```
+
+### Status Filter
+
+Filters by exact status values:
+
+```php app/Filters/Orders/OrderStatusFilter.php
+<?php
+
+namespace App\Filters\Orders;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class OrderStatusFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $status = $this->request->input('status');
+        
+        // Support filtering by multiple statuses
+        if (is_array($status)) {
+            return $query->whereIn('status', $status);
+        }
+        
+        return $status ? $query->where('status', $status) : $query;
+    }
+}
+```
+
+### Date Range Filter
+
+Filters records between two dates. Note that a single filter can handle multiple request parameters:
+
+```php app/Filters/Orders/OrderDateFilter.php
+<?php
+
+namespace App\Filters\Orders;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+use Illuminate\Support\Carbon;
+
+class OrderDateFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $from = $this->request->input('from_date');
+        $to = $this->request->input('to_date');
+
+        return $query
+            ->when($from, function($q) use ($from) {
+                return $q->whereDate('order_date', '>=', Carbon::parse($from));
+            })
+            ->when($to, function($q) use ($to) {
+                return $q->whereDate('order_date', '<=', Carbon::parse($to));
+            });
+    }
+}
+```
+
+<Info>
+  A single filter class can handle multiple related request parameters. In this case, `from_date` and `to_date` are both handled by `OrderDateFilter`.
+</Info>
+
+### Amount Range Filter
+
+Filters by numeric ranges:
+
+```php app/Filters/Orders/OrderAmountFilter.php
+<?php
+
+namespace App\Filters\Orders;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class OrderAmountFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $min = $this->request->input('min_amount');
+        $max = $this->request->input('max_amount');
+
+        return $query
+            ->when($min, fn($q) => $q->where('total_amount', '>=', $min))
+            ->when($max, fn($q) => $q->where('total_amount', '<=', $max));
+    }
+}
+```
+
+### Boolean/Conditional Filter
+
+Filters based on conditional logic:
+
+```php app/Filters/Orders/OrderUrgentFilter.php
+<?php
+
+namespace App\Filters\Orders;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class OrderUrgentFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $value = $this->request->input('is_urgent');
+        
+        if ($value === 'yes' || $value === '1' || $value === true) {
+            return $query->where('is_urgent', true);
+        }
+        
+        if ($value === 'no' || $value === '0' || $value === false) {
+            return $query->where('is_urgent', false);
+        }
+        
+        return $query;
+    }
+}
+```
+
+## Step 3: Apply Filters in Controller
+
+Now use your filter system in a controller:
+
+```php app/Http/Controllers/Orders/OrderController.php
+<?php
+
+namespace App\Http\Controllers\Orders;
+
+use App\Http\Controllers\Controller;
+use App\Models\Orders\Order;
+use App\Filters\Orders\OrderFilters;
+use Illuminate\Http\Request;
+
+class OrderController extends Controller
+{
+    public function index(Request $request)
+    {
+        $perPage = $request->input('per_page', 15);
+
+        // Apply filters to the query
+        $orders = (new OrderFilters($request))
+            ->apply(
+                Order::query()
+                    ->with(['customer', 'items', 'warehouse'])
+            )
+            ->latest('order_date')
+            ->paginate($perPage)
+            ->withQueryString(); // Preserve query parameters in pagination links
+
+        return view('orders.index', compact('orders'));
+    }
+}
+```
+
+## Advanced Patterns
+
+### Complex Relationship Filtering
+
+Filtering through nested relationships:
+
+```php app/Filters/Orders/OrderProductCategoryFilter.php
+<?php
+
+namespace App\Filters\Orders;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class OrderProductCategoryFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $categoryId = $this->request->input('product_category');
+        
+        if (!$categoryId) return $query;
+
+        return $query->whereHas('items.product', function($q) use ($categoryId) {
+            $q->where('category_id', $categoryId);
+        });
+    }
+}
+```
+
+### Aggregated Data Filtering
+
+Filtering based on calculated values:
+
+```php app/Filters/Orders/OrderItemCountFilter.php
+<?php
+
+namespace App\Filters\Orders;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class OrderItemCountFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $minItems = $this->request->input('min_items');
+        
+        if (!$minItems) return $query;
+
+        return $query->has('items', '>=', $minItems);
+    }
+}
+```
+
+### Dynamic Sorting Filter
+
+While not strictly a filter, you can implement sorting as part of your filter pipeline:
+
+```php app/Filters/Orders/OrderSortFilter.php
+<?php
+
+namespace App\Filters\Orders;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class OrderSortFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $sortBy = $this->request->input('sort_by', 'created_at');
+        $direction = $this->request->input('sort_direction', 'desc');
+        
+        // Whitelist allowed sort fields
+        $allowedFields = ['order_date', 'total_amount', 'created_at', 'status'];
+        
+        if (!in_array($sortBy, $allowedFields)) {
+            $sortBy = 'created_at';
+        }
+        
+        $direction = in_array($direction, ['asc', 'desc']) ? $direction : 'desc';
+        
+        return $query->orderBy($sortBy, $direction);
+    }
+}
+```
+
+## Testing Your Filters
+
+### Unit Test Example
+
+```php tests/Unit/Filters/OrderStatusFilterTest.php
+<?php
+
+namespace Tests\Unit\Filters;
+
+use Tests\TestCase;
+use App\Models\Orders\Order;
+use App\Filters\Orders\OrderStatusFilter;
+use Illuminate\Http\Request;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class OrderStatusFilterTest extends TestCase
+{
+    use RefreshDatabase;
+
+    /** @test */
+    public function it_filters_orders_by_status()
+    {
+        // Arrange
+        Order::factory()->create(['status' => 'pending']);
+        Order::factory()->create(['status' => 'completed']);
+        Order::factory()->create(['status' => 'pending']);
+
+        $request = Request::create('/', 'GET', ['status' => 'pending']);
+        $filter = new OrderStatusFilter($request);
+
+        // Act
+        $query = Order::query();
+        $result = $filter->apply($query)->get();
+
+        // Assert
+        $this->assertCount(2, $result);
+        $this->assertTrue($result->every(fn($order) => $order->status === 'pending'));
+    }
+
+    /** @test */
+    public function it_returns_all_orders_when_no_status_provided()
+    {
+        // Arrange
+        Order::factory()->count(3)->create();
+
+        $request = Request::create('/', 'GET', []);
+        $filter = new OrderStatusFilter($request);
+
+        // Act
+        $query = Order::query();
+        $result = $filter->apply($query)->get();
+
+        // Assert
+        $this->assertCount(3, $result);
+    }
+}
+```
+
+### Feature Test Example
+
+```php tests/Feature/OrderFilteringTest.php
+<?php
+
+namespace Tests\Feature;
+
+use Tests\TestCase;
+use App\Models\Orders\Order;
+use App\Models\Customers\Customer;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class OrderFilteringTest extends TestCase
+{
+    use RefreshDatabase;
+
+    /** @test */
+    public function users_can_filter_orders_by_customer()
+    {
+        // Arrange
+        $customer = Customer::factory()->create();
+        $order1 = Order::factory()->create(['customer_id' => $customer->id]);
+        $order2 = Order::factory()->create(); // Different customer
+
+        // Act
+        $response = $this->get(route('orders.index', ['customer_id' => $customer->id]));
+
+        // Assert
+        $response->assertSuccessful();
+        $response->assertSee($order1->order_number);
+        $response->assertDontSee($order2->order_number);
+    }
+
+    /** @test */
+    public function users_can_combine_multiple_filters()
+    {
+        // Arrange
+        $customer = Customer::factory()->create();
+        Order::factory()->create([
+            'customer_id' => $customer->id,
+            'status' => 'pending',
+            'total_amount' => 100,
+        ]);
+        Order::factory()->create([
+            'customer_id' => $customer->id,
+            'status' => 'completed',
+            'total_amount' => 200,
+        ]);
+
+        // Act
+        $response = $this->get(route('orders.index', [
+            'customer_id' => $customer->id,
+            'status' => 'pending',
+            'min_amount' => 50,
+        ]));
+
+        // Assert
+        $response->assertSuccessful();
+        // Add specific assertions based on your view
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always validate and sanitize input">
+    ```php
+    public function apply(Builder $query): Builder
+    {
+        $status = $this->request->input('status');
+        
+        // Validate against allowed values
+        $allowedStatuses = ['pending', 'processing', 'completed', 'cancelled'];
+        
+        if ($status && in_array($status, $allowedStatuses)) {
+            return $query->where('status', $status);
+        }
+        
+        return $query;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Return early when no filter value">
+    ```php
+    public function apply(Builder $query): Builder
+    {
+        $value = $this->request->input('search');
+        
+        // Early return prevents unnecessary query building
+        if (!$value) return $query;
+        
+        return $query->where('name', 'like', "%{$value}%");
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Use closures for OR conditions">
+    ```php
+    public function apply(Builder $query): Builder
+    {
+        $value = $this->request->input('search');
+        
+        if (!$value) return $query;
+        
+        // Wrap OR conditions in a closure
+        return $query->where(function($q) use ($value) {
+            $q->where('field1', 'like', "%{$value}%")
+              ->orWhere('field2', 'like', "%{$value}%");
+        });
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Keep filters focused and single-purpose">
+    Each filter should handle one specific filtering concern. If you need to filter by multiple related criteria, it's okay to handle them in the same filter (like `from_date` and `to_date`), but don't combine unrelated logic.
+    
+    ```php
+    // Good: Handles related date parameters
+    class OrderDateFilter implements FilterInterface
+    {
+        public function apply(Builder $query): Builder
+        {
+            $from = $this->request->input('from_date');
+            $to = $this->request->input('to_date');
+            
+            return $query
+                ->when($from, fn($q) => $q->whereDate('order_date', '>=', $from))
+                ->when($to, fn($q) => $q->whereDate('order_date', '<=', $to));
+        }
+    }
+    
+    // Bad: Mixes unrelated concerns
+    class OrderMixedFilter implements FilterInterface
+    {
+        public function apply(Builder $query): Builder
+        {
+            $from = $this->request->input('from_date');
+            $status = $this->request->input('status');
+            $customerId = $this->request->input('customer_id');
+            
+            // Too many responsibilities!
+            return $query
+                ->when($from, fn($q) => $q->whereDate('order_date', '>=', $from))
+                ->when($status, fn($q) => $q->where('status', $status))
+                ->when($customerId, fn($q) => $q->where('customer_id', $customerId));
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Use type hints and return types">
+    ```php
+    class OrderStatusFilter implements FilterInterface
+    {
+        public function __construct(protected Request $request) {}
+        
+        public function apply(Builder $query): Builder
+        {
+            // Method implementation
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Document complex filter logic">
+    ```php
+    /**
+     * Filters orders by urgency based on multiple criteria:
+     * - Orders marked as urgent
+     * - Orders with delivery date within 24 hours
+     * - Orders from VIP customers
+     */
+    class OrderUrgencyFilter implements FilterInterface
+    {
+        public function apply(Builder $query): Builder
+        {
+            // Implementation
+        }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common Pitfalls
+
+<Warning>
+  **Don't modify the query without returning it**
+  
+  ```php
+  // Wrong
+  public function apply(Builder $query): Builder
+  {
+      $query->where('status', 'active');
+      // Missing return statement!
+  }
+  
+  // Correct
+  public function apply(Builder $query): Builder
+  {
+      return $query->where('status', 'active');
+  }
+  ```
+</Warning>
+
+<Warning>
+  **Don't forget to handle null/empty values**
+  
+  ```php
+  // Wrong - could cause unexpected behavior
+  public function apply(Builder $query): Builder
+  {
+      $status = $this->request->input('status');
+      return $query->where('status', $status); // What if $status is null?
+  }
+  
+  // Correct
+  public function apply(Builder $query): Builder
+  {
+      $status = $this->request->input('status');
+      return $status ? $query->where('status', $status) : $query;
+  }
+  ```
+</Warning>
+
+<Warning>
+  **Don't forget to register filters in the main filter class**
+  
+  ```php
+  // You created OrderUrgentFilter but forgot to add it here:
+  class OrderFilters extends QueryFilter
+  {
+      protected function filters(): array
+      {
+          return [
+              'search' => OrderSearchFilter::class,
+              'status' => OrderStatusFilter::class,
+              // Missing: 'is_urgent' => OrderUrgentFilter::class,
+          ];
+      }
+  }
+  ```
+</Warning>
+
+## Directory Structure
+
+Organize your filters in a logical directory structure:
+
+```
+app/Filters/
+├── Base/
+│   └── QueryFilter.php
+├── Contracts/
+│   └── FilterInterface.php
+├── Orders/
+│   ├── OrderFilters.php
+│   ├── OrderSearchFilter.php
+│   ├── OrderStatusFilter.php
+│   ├── OrderCustomerFilter.php
+│   ├── OrderDateFilter.php
+│   └── OrderAmountFilter.php
+├── Sales/
+│   └── SalesFilters/
+│       ├── SaleFilters.php
+│       ├── SaleSearchFilter.php
+│       └── ...
+└── Accounting/
+    └── PaymentsFilters/
+        ├── PaymentFilters.php
+        ├── PaymentSearchFilter.php
+        └── ...
+```
+
+## Summary
+
+<Steps>
+  <Step title="Create Main Filter Class">
+    Extend `QueryFilter` and map request parameters to filter classes in the `filters()` method.
+  </Step>
+  
+  <Step title="Implement Individual Filters">
+    Create focused filter classes that implement `FilterInterface` with a single responsibility.
+  </Step>
+  
+  <Step title="Apply in Controllers">
+    Instantiate your main filter class with the request and apply it to your query builder.
+  </Step>
+  
+  <Step title="Test Thoroughly">
+    Write unit and feature tests to ensure filters work correctly in isolation and combination.
+  </Step>
+</Steps>
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Filters Overview" icon="book" href="/api/filters/overview">
+    Learn about the filter architecture and patterns
+  </Card>
+  <Card title="Query Builder" icon="database" href="/api/query-builder/overview">
+    Understand Eloquent query builder methods
+  </Card>
+</CardGroup>

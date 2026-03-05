@@ -1,0 +1,547 @@
+---
+title: Service Layer
+description: Understanding the service layer pattern for business logic in Gestión de Ventas
+icon: 'gear'
+---
+
+## Overview
+
+The **Service Layer** is where all business logic lives in Gestión de Ventas. Services handle database transactions, complex calculations, integrations with other modules, and bulk operations.
+
+<Warning>
+  **Golden Rule:** Controllers should never contain business logic. All create, update, and delete operations must go through services.
+</Warning>
+
+## Why Use Services?
+
+<CardGroup cols={2}>
+  <Card title="Reusability" icon="recycle">
+    Use the same logic from controllers, commands, jobs, and tests
+  </Card>
+  <Card title="Testability" icon="vial">
+    Services can be unit tested without HTTP requests
+  </Card>
+  <Card title="Transactions" icon="database">
+    Centralized transaction management ensures data consistency
+  </Card>
+  <Card title="Single Responsibility" icon="bullseye">
+    Each service focuses on one module's business rules
+  </Card>
+</CardGroup>
+
+---
+
+## Service Types
+
+Every module typically has two types of services:
+
+### 1. Business Service
+
+**File Pattern:** `app/Services/[Module]/[Module]Service.php`
+
+**Purpose:** Handle write operations, complex calculations, and processes.
+
+**Common Methods:**
+- `create(array $data)` - Create new records
+- `update(Model $model, array $data)` - Update existing records
+- `delete(Model $model)` - Soft or hard delete
+- `cancel(Model $model, ?string $reason)` - Cancel/void records
+- `performBulkAction(array $ids, string $action)` - Bulk operations
+
+### 2. Catalog Service
+
+**File Pattern:** `app/Services/[Module]/[Module]CatalogService.php`
+
+**Purpose:** Provide data for dropdowns, selects, and filters.
+
+**Common Methods:**
+- `getForFilters()` - Data for index page filters
+- `getForForm()` - Data for create/edit forms
+- `getForSelect(?int $countryId)` - Country-filtered options
+
+---
+
+## Business Service: Deep Dive
+
+Let's examine the `SaleService` to understand service layer best practices.
+
+### Constructor Injection
+
+Services should inject their dependencies via constructor:
+
+```php app/Services/Sales/SalesServices/SaleService.php
+class SaleService
+{
+    public function __construct(
+        protected InventoryMovementService $inventoryService,
+        protected JournalEntryService $journalService,
+        protected ReceivableService $receivableService,
+        protected InvoiceService $invoiceService,
+        protected NcfGeneratorInterface $ncfGenerator
+    ) {}
+}
+```
+
+<Note>
+  Using constructor injection allows Laravel's service container to automatically resolve dependencies and makes testing with mocks easy.
+</Note>
+
+### Create Method Pattern
+
+All creation methods should:
+1. Wrap everything in a database transaction
+2. Generate document numbers
+3. Create the main record
+4. Create related records (items, movements, etc.)
+5. Trigger side effects (accounting, inventory, etc.)
+6. Return the created model
+
+```php app/Services/Sales/SalesServices/SaleService.php
+public function create(array $data): Sale
+{
+    return DB::transaction(function () use ($data) {
+        // 1. Get and increment document number
+        $docType = DocumentType::where('code', 'FAC')->firstOrFail();
+        $saleNumber = $docType->getNextNumberFormatted();
+        $docType->increment('current_number');
+
+        // 2. Create main record
+        $sale = Sale::create([
+            'document_type_id' => $docType->id,
+            'number'           => $saleNumber,
+            'client_id'        => $data['client_id'],
+            'warehouse_id'     => $data['warehouse_id'],
+            'user_id'          => Auth::id(),
+            'sale_date'        => isset($data['sale_date']) 
+                                    ? Carbon::parse($data['sale_date'])->setTimeFrom(now()) 
+                                    : now(),
+            'total_amount'     => $data['total_amount'],
+            'payment_type'     => $data['payment_type'],
+            'tipo_pago_id'     => $data['payment_type'] === Sale::PAYMENT_CASH 
+                                    ? $data['tipo_pago_id'] 
+                                    : null,
+            'status'           => Sale::STATUS_COMPLETED,
+            'notes'            => $data['notes'] ?? null,
+        ]);
+
+        // 3. Generate NCF if needed
+        if (isset($data['ncf_type_id'])) {
+            $fullNcf = $this->ncfGenerator->generate($sale, $data['ncf_type_id']);
+            $sale->update(['ncf' => $fullNcf]);
+        }
+
+        // 4. Create sale items
+        foreach ($data['items'] as $item) {
+            $sale->items()->create([
+                'product_id' => $item['product_id'],
+                'quantity'   => $item['quantity'],
+                'unit_price' => $item['price'],
+                'subtotal'   => $item['quantity'] * $item['price'],
+            ]);
+
+            // 5. Register inventory movement
+            $this->inventoryService->register([
+                'warehouse_id'   => $data['warehouse_id'],
+                'product_id'     => $item['product_id'],
+                'quantity'       => $item['quantity'],
+                'type'           => InventoryMovement::TYPE_OUTPUT,
+                'description'    => "Venta {$saleNumber}",
+                'reference_type' => Sale::class,
+                'reference_id'   => $sale->id,
+            ]);
+        }
+
+        // 6. Handle payment-specific logic
+        if ($sale->payment_type === Sale::PAYMENT_CASH) {
+            $this->generateSaleAccountingEntry($sale);
+        } else {
+            $this->receivableService->createReceivable([
+                'client_id'       => $sale->client_id,
+                'total_amount'    => $sale->total_amount,
+                'emission_date'   => $sale->sale_date,
+                'due_date'        => $sale->sale_date->copy()->addDays(30),
+                'document_number' => $sale->number,
+                'reference_type'  => Sale::class,
+                'reference_id'    => $sale->id,
+                'description'     => "Venta a crédito registrada desde POS"
+            ]);
+        }
+
+        // 7. Create invoice
+        $this->invoiceService->createFromSale($sale);
+        
+        return $sale;
+    });
+}
+```
+
+<Accordion title="Why use DB::transaction()?">
+  Database transactions ensure that either **all** operations succeed or **none** of them do. If any step fails, the entire transaction is rolled back, preventing partial data corruption.
+  
+  For example, if the accounting entry fails after creating the sale, the transaction rollback will delete the sale too, keeping your database consistent.
+</Accordion>
+
+### Cancel Method Pattern
+
+Cancellation methods should:
+1. Check current status
+2. Validate business rules (e.g., no payments made)
+3. Reverse all side effects in the correct order
+4. Update the record status
+
+```php app/Services/Sales/SalesServices/SaleService.php
+public function cancel(Sale $sale, ?string $reason = null): bool
+{
+    return DB::transaction(function () use ($sale, $reason) {
+        // 1. Check if already canceled
+        if ($sale->status === Sale::STATUS_CANCELED) {
+            throw new Exception("La venta ya se encuentra anulada.");
+        }
+
+        // 2. Handle financial reversal (Receivables)
+        if ($sale->payment_type === Sale::PAYMENT_CREDIT) {
+            $receivable = Receivable::where('reference_type', Sale::class)
+                ->where('reference_id', $sale->id)
+                ->first();
+
+            if ($receivable) {
+                if ($receivable->current_balance < $receivable->total_amount) {
+                    throw new Exception("No se puede anular: El cliente ya tiene abonos.");
+                }
+                $this->receivableService->cancelReceivable($receivable);
+            }
+        }
+
+        // 3. Update NCF log with cancellation reason
+        NcfLog::where('sale_id', $sale->id)
+            ->update([
+                'status' => NcfLog::STATUS_VOIDED,
+                'cancellation_reason' => $reason ?? 'Anulación de venta manual'
+            ]);
+
+        // 4. Reverse accounting entries
+        $this->generateCancellationAccountingEntry($sale);
+
+        // 5. Reverse inventory (return stock)
+        foreach ($sale->items as $item) {
+            $this->inventoryService->register([
+                'warehouse_id'   => $sale->warehouse_id,
+                'product_id'     => $item->product_id,
+                'quantity'       => $item->quantity,
+                'type'           => InventoryMovement::TYPE_ADJUSTMENT,
+                'description'    => "Reversión por anulación {$sale->number}",
+                'reference_type' => Sale::class,
+                'reference_id'   => $sale->id,
+            ]);
+        }
+
+        // 6. Cancel invoice
+        $this->invoiceService->cancelInvoice($sale);
+        
+        // 7. Update sale status
+        return $sale->update(['status' => Sale::STATUS_CANCELED]);
+    });
+}
+```
+
+<Warning>
+  **Order Matters!** When reversing operations, be careful about the order. For example, reverse receivables before reversing accounting entries.
+</Warning>
+
+### Protected Helper Methods
+
+Complex operations should be broken into protected helper methods:
+
+```php app/Services/Sales/SalesServices/SaleService.php
+protected function generateSaleAccountingEntry(Sale $sale)
+{
+    $incomeAccount = AccountingAccount::where('code', '4.1')->first();
+    
+    // Use payment type's account or default to cash (1.1.01)
+    $debitAccountId = $sale->tipoPago?->accounting_account_id 
+                    ?? AccountingAccount::where('code', '1.1.01')->value('id');
+
+    if (!$debitAccountId || !$incomeAccount) {
+        throw new Exception("Configuración contable incompleta.");
+    }
+
+    $this->journalService->create([
+        'entry_date'  => $sale->sale_date,
+        'reference'   => $sale->number,
+        'description' => "Venta Contado ({$sale->tipoPago->nombre}) - {$sale->client->name}",
+        'status'      => JournalEntry::STATUS_POSTED,
+        'items' => [
+            [
+                'accounting_account_id' => $debitAccountId,
+                'debit' => $sale->total_amount,
+                'credit' => 0
+            ],
+            [
+                'accounting_account_id' => $incomeAccount->id,
+                'debit' => 0,
+                'credit' => $sale->total_amount
+            ]
+        ]
+    ]);
+}
+
+protected function generateCancellationAccountingEntry(Sale $sale)
+{
+    $incomeAccount = AccountingAccount::where('code', '4.1')->first();
+    
+    if ($sale->payment_type === Sale::PAYMENT_CASH) {
+        $contraAccount = AccountingAccount::where('code', '1.1.01')->first();
+    } else {
+        $contraAccount = $sale->client->accountingAccount 
+                      ?? AccountingAccount::where('code', '1.1.02')->first();
+    }
+
+    $this->journalService->create([
+        'entry_date'  => now(),
+        'reference'   => "REV-{$sale->number}",
+        'description' => "Anulación Venta {$sale->number}",
+        'status'      => JournalEntry::STATUS_POSTED,
+        'items' => [
+            [
+                'accounting_account_id' => $incomeAccount->id,
+                'debit' => $sale->total_amount,
+                'credit' => 0
+            ],
+            [
+                'accounting_account_id' => $contraAccount->id,
+                'debit' => 0,
+                'credit' => $sale->total_amount
+            ]
+        ]
+    ]);
+}
+```
+
+---
+
+## Catalog Service: Deep Dive
+
+Catalog services provide clean, filtered data for UI components.
+
+```php app/Services/Sales/SalesServices/SaleCatalogService.php
+class SaleCatalogService
+{
+    /**
+     * Data for index page filters
+     */
+    public function getForFilters(): array
+    {
+        return [
+            'clients' => Client::whereHas('sales')
+                ->select('id', 'name')
+                ->orderBy('name')
+                ->get(),
+
+            'warehouses' => Warehouse::select('id', 'name')
+                ->orderBy('name')
+                ->get(),
+
+            'payment_types' => Sale::getPaymentTypes(),
+            
+            'tipo_pagos' => TipoPago::activo()
+                ->select('id', 'nombre')
+                ->get(),
+
+            'statuses' => Sale::getStatuses(),
+        ];
+    }
+
+    /**
+     * Data for create/edit forms
+     */
+    public function getForForm(): array
+    {
+        return [
+            // Clients with credit information
+            'clients' => Client::with('estadoCliente.categoria')
+                ->whereHas('estadoCliente.categoria', function ($query) {
+                    $query->whereIn('code', ['OPERATIVO', 'FINANCIERO_RESTRICTO']);
+                })
+                ->select('id', 'name', 'tax_id', 'credit_limit', 'balance')
+                ->orderByRaw("CASE WHEN name = 'Consumidor Final' THEN 0 ELSE 1 END")
+                ->orderBy('name')
+                ->get()
+                ->map(function ($client) {
+                    return [
+                        'id'           => $client->id,
+                        'name'         => $client->name,
+                        'tax_id'       => $client->tax_id,
+                        'credit_limit' => $client->credit_limit,
+                        'balance'      => $client->balance,
+                        'available'    => $client->credit_limit - $client->balance,
+                        'is_moroso'    => ($client->estadoCliente->categoria->code ?? '') === 'FINANCIERO_RESTRICTO',
+                    ];
+                }),
+
+            // Products with stock information
+            'products' => InventoryStock::with('product')
+                ->where('quantity', '>', 0)
+                ->get()
+                ->map(function ($stock) {
+                    return [
+                        'id'           => $stock->product_id,
+                        'name'         => $stock->product->name,
+                        'price'        => $stock->product->price,
+                        'warehouse_id' => $stock->warehouse_id,
+                        'stock'        => $stock->quantity,
+                    ];
+                }),
+
+            'warehouses' => Warehouse::select('id', 'name', 'type')->get(),
+            'payment_types' => Sale::getPaymentTypes(),
+            'tipo_pagos' => TipoPago::activo()->get(),
+            'ncf_types' => NcfType::active()->get(),
+        ];
+    }
+}
+```
+
+<Tip>
+  Use `map()` to transform data and calculate derived fields (like available credit) in the catalog service rather than in the view.
+</Tip>
+
+---
+
+## Service Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always Use Transactions">
+    Wrap multi-step operations in `DB::transaction()` to ensure atomicity.
+    
+    ```php
+    public function create(array $data): Model
+    {
+        return DB::transaction(function () use ($data) {
+            // All operations here
+        });
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Inject Dependencies">
+    Use constructor injection for services and interfaces:
+    
+    ```php
+    public function __construct(
+        protected OtherService $otherService,
+        protected SomeInterface $someInterface
+    ) {}
+    ```
+  </Accordion>
+
+  <Accordion title="Return Models or Collections">
+    Always return the created/updated model so controllers can use it:
+    
+    ```php
+    public function create(array $data): Sale
+    {
+        // ...
+        return $sale; // ✅ Return the model
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Throw Meaningful Exceptions">
+    Use descriptive exception messages that can be shown to users:
+    
+    ```php
+    if ($stock->quantity < $requestedQuantity) {
+        throw new Exception(
+            "Stock insuficiente. Disponible: {$stock->quantity}"
+        );
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Keep Services Focused">
+    Each service should handle one module. Don't create a "GeneralService" that does everything.
+  </Accordion>
+
+  <Accordion title="Use Type Hints">
+    Always declare parameter types and return types:
+    
+    ```php
+    public function create(array $data): Sale // ✅
+    public function create($data) // ❌
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Testing Services
+
+Services are easy to test because they don't depend on HTTP requests:
+
+```php tests/Unit/SaleServiceTest.php
+class SaleServiceTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_creates_sale_with_inventory_movement()
+    {
+        // Arrange
+        $client = Client::factory()->create();
+        $warehouse = Warehouse::factory()->create();
+        $product = Product::factory()->create();
+        
+        InventoryStock::create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity' => 100
+        ]);
+
+        $data = [
+            'client_id' => $client->id,
+            'warehouse_id' => $warehouse->id,
+            'payment_type' => Sale::PAYMENT_CASH,
+            'total_amount' => 100,
+            'items' => [
+                [
+                    'product_id' => $product->id,
+                    'quantity' => 5,
+                    'price' => 20
+                ]
+            ]
+        ];
+
+        // Act
+        $service = app(SaleService::class);
+        $sale = $service->create($data);
+
+        // Assert
+        $this->assertDatabaseHas('sales', [
+            'id' => $sale->id,
+            'client_id' => $client->id,
+            'total_amount' => 100
+        ]);
+        
+        $this->assertDatabaseHas('inventory_movements', [
+            'product_id' => $product->id,
+            'quantity' => 5,
+            'type' => InventoryMovement::TYPE_OUTPUT
+        ]);
+    }
+}
+```
+
+---
+
+## Related Documentation
+
+<CardGroup cols={3}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Understand the overall system design
+  </Card>
+  <Card title="Filters Pipeline" icon="filter" href="/concepts/filters-pipeline">
+    Learn about filtering patterns
+  </Card>
+  <Card title="Permissions" icon="shield-check" href="/concepts/permissions">
+    Authorization and security
+  </Card>
+</CardGroup>

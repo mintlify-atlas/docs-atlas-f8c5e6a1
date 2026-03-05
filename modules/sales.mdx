@@ -1,0 +1,335 @@
+---
+title: "Sales Module"
+description: "Complete sales tracking and management with support for cash and credit transactions"
+---
+
+## Overview
+
+The Sales module is the core of the ERP system, managing all sales transactions from creation to completion. It supports both cash and credit sales, integrates with inventory for automatic stock adjustments, and generates accounting entries automatically.
+
+<CardGroup cols={3}>
+  <Card title="Point of Sale" icon="cash-register" href="/features/point-of-sale">
+    Fast checkout with multiple payment methods
+  </Card>
+  <Card title="NCF Generation" icon="file-invoice" href="/features/ncf-generation">
+    Tax-compliant invoice numbering
+  </Card>
+  <Card title="Accounting" icon="calculator" href="/modules/accounting">
+    Automatic journal entries
+  </Card>
+</CardGroup>
+
+## Key Features
+
+### Sale Types
+
+The system supports two primary sale types:
+
+<Tabs>
+  <Tab title="Cash Sales">
+    Cash sales are completed immediately with payment received at the time of transaction.
+
+    **Features:**
+    - Multiple payment methods (cash, card, transfer)
+    - Cash handling with change calculation
+    - Immediate accounting entry generation
+    - Automatic invoice generation
+    - Real-time inventory adjustment
+
+    ```php app/Models/Sales/Sale.php
+    const PAYMENT_CASH   = 'cash';
+    const PAYMENT_CREDIT = 'credit';
+
+    public static function getPaymentTypes(): array
+    {
+        return [
+            self::PAYMENT_CASH   => 'Contado',
+            self::PAYMENT_CREDIT => 'Crédito',
+        ];
+    }
+    ```
+  </Tab>
+  <Tab title="Credit Sales">
+    Credit sales allow customers to purchase now and pay later, with full receivables tracking.
+
+    **Features:**
+    - Credit limit validation
+    - Payment terms configuration
+    - Automatic receivable creation
+    - Balance tracking
+    - Aging reports
+    - Payment application
+
+    ```php app/Services/Sales/SalesServices/SaleService.php
+    if ($sale->payment_type === Sale::PAYMENT_CASH) {
+        $this->generateSaleAccountingEntry($sale);
+    } else {
+        $this->receivableService->createReceivable([
+            'client_id'       => $sale->client_id,
+            'total_amount'    => $sale->total_amount,
+            'emission_date'   => $sale->sale_date,
+            'due_date'        => $sale->sale_date->copy()->addDays(30),
+            'document_number' => $sale->number,
+            'reference_type'  => Sale::class,
+            'reference_id'    => $sale->id,
+        ]);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Sale Workflow
+
+<Steps>
+  <Step title="Create Sale">
+    Start a new sale by selecting the client, warehouse, and payment type.
+
+    ```php
+    $sale = Sale::create([
+        'client_id'    => $clientId,
+        'warehouse_id' => $warehouseId,
+        'payment_type' => Sale::PAYMENT_CASH,
+        'status'       => Sale::STATUS_COMPLETED,
+    ]);
+    ```
+  </Step>
+  <Step title="Add Items">
+    Add products to the sale with quantities and prices.
+
+    ```php
+    foreach ($data['items'] as $item) {
+        $sale->items()->create([
+            'product_id' => $item['product_id'],
+            'quantity'   => $item['quantity'],
+            'unit_price' => $item['price'],
+            'subtotal'   => $item['quantity'] * $item['price'],
+        ]);
+    }
+    ```
+  </Step>
+  <Step title="Adjust Inventory">
+    Automatically reduce stock for each product sold.
+
+    ```php
+    $this->inventoryService->register([
+        'warehouse_id'   => $data['warehouse_id'],
+        'product_id'     => $item['product_id'],
+        'quantity'       => $item['quantity'],
+        'type'           => InventoryMovement::TYPE_OUTPUT,
+        'description'    => "Venta {$saleNumber}",
+        'reference_type' => Sale::class,
+        'reference_id'   => $sale->id,
+    ]);
+    ```
+  </Step>
+  <Step title="Generate Accounting">
+    Create journal entries for the sale based on payment type.
+
+    **Cash Sale:**
+    ```
+    Debit:  Cash/Bank Account (1.1.01)     $1,000
+    Credit: Sales Revenue (4.1)            $1,000
+    ```
+
+    **Credit Sale:**
+    ```
+    Debit:  Accounts Receivable (1.1.02)   $1,000
+    Credit: Sales Revenue (4.1)            $1,000
+    ```
+  </Step>
+  <Step title="Generate Invoice">
+    Automatically create and print the invoice with NCF if applicable.
+
+    ```php
+    $this->invoiceService->createFromSale($sale);
+    ```
+  </Step>
+</Steps>
+
+## Sale Status Management
+
+Sales can have the following statuses:
+
+```php app/Models/Sales/Sale.php
+const STATUS_COMPLETED = 'completed';
+const STATUS_CANCELED  = 'canceled';
+
+public static function getStatuses(): array
+{
+    return [
+        self::STATUS_COMPLETED => 'Completada',
+        self::STATUS_CANCELED  => 'Anulada',
+    ];
+}
+```
+
+### Canceling Sales
+
+When a sale is canceled, the system:
+
+1. **Reverses inventory** - Returns products to stock
+2. **Reverses accounting** - Creates reversal journal entry
+3. **Cancels receivable** - If credit sale with no payments
+4. **Voids NCF** - Updates NCF status for DGII compliance
+5. **Cancels invoice** - Marks invoice as cancelled
+
+```php app/Services/Sales/SalesServices/SaleService.php
+public function cancel(Sale $sale, ?string $reason = null): bool
+{
+    return DB::transaction(function () use ($sale, $reason) {
+        // Reverse inventory
+        foreach ($sale->items as $item) {
+            $this->inventoryService->register([
+                'warehouse_id'   => $sale->warehouse_id,
+                'product_id'     => $item->product_id,
+                'quantity'       => $item->quantity,
+                'type'           => InventoryMovement::TYPE_ADJUSTMENT,
+                'description'    => "Reversión {$sale->number}",
+            ]);
+        }
+
+        // Reverse accounting
+        $this->generateCancellationAccountingEntry($sale);
+
+        // Update NCF status
+        NcfLog::where('sale_id', $sale->id)
+            ->update([
+                'status' => NcfLog::STATUS_VOIDED,
+                'cancellation_reason' => $reason
+            ]);
+
+        return $sale->update(['status' => Sale::STATUS_CANCELED]);
+    });
+}
+```
+
+<Warning>
+  Credit sales cannot be canceled if any payments have been applied. The receivable must have a zero balance or be fully unpaid.
+</Warning>
+
+## Data Structure
+
+### Sale Model
+
+```php app/Models/Sales/Sale.php
+protected $fillable = [
+    'document_type_id',
+    'number',
+    'client_id',
+    'warehouse_id',
+    'user_id',
+    'sale_date',
+    'total_amount',
+    'payment_type',
+    'tipo_pago_id',
+    'cash_received',
+    'cash_change',
+    'status',
+    'notes',
+];
+```
+
+### Relationships
+
+<AccordionGroup>
+  <Accordion title="Sale Items">
+    ```php
+    public function items(): HasMany {
+        return $this->hasMany(SaleItem::class);
+    }
+    ```
+    Contains the products, quantities, and prices for each line item.
+  </Accordion>
+  <Accordion title="Client">
+    ```php
+    public function client(): BelongsTo {
+        return $this->belongsTo(Client::class);
+    }
+    ```
+    The customer who made the purchase.
+  </Accordion>
+  <Accordion title="Warehouse">
+    ```php
+    public function warehouse(): BelongsTo {
+        return $this->belongsTo(Warehouse::class);
+    }
+    ```
+    The warehouse from which products were sold.
+  </Accordion>
+  <Accordion title="Invoice">
+    ```php
+    public function invoice(): HasOne {
+        return $this->hasOne(Invoice::class);
+    }
+    ```
+    The generated invoice document.
+  </Accordion>
+  <Accordion title="NCF Log">
+    ```php
+    public function ncfLog(): HasOne {
+        return $this->hasOne(NcfLog::class, 'sale_id');
+    }
+    ```
+    The fiscal number assignment record.
+  </Accordion>
+</AccordionGroup>
+
+## Reporting & Exports
+
+The Sales module includes powerful reporting capabilities:
+
+### Filters
+
+Filter sales by:
+- Date range
+- Client
+- Payment type (cash/credit)
+- Status (completed/canceled)
+- Amount range
+- Search (number, client name, notes)
+
+```php app/Filters/Sales/SalesFilters/SaleFilters.php
+$sales = (new SaleFilters($request))
+    ->apply(Sale::query()->withIndexRelations())
+    ->latest()
+    ->paginate();
+```
+
+### Excel Export
+
+Export filtered sales data with:
+- Sale number and date
+- Client information
+- Payment type and amount
+- Cash received and change
+- Status
+- User who created the sale
+
+```php app/Http/Controllers/Sales/SaleController.php
+public function export(Request $request)
+{
+    $query = (new SaleFilters($request))
+        ->apply(Sale::query());
+
+    $fileName = 'reporte-ventas-' . now()->format('d-m-Y-H-i') . '.xlsx';
+
+    return Excel::download(new SalesExport($query), $fileName);
+}
+```
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Point of Sale" icon="cash-register" href="/features/point-of-sale">
+    Learn about the POS interface
+  </Card>
+  <Card title="NCF Generation" icon="file-invoice" href="/features/ncf-generation">
+    Understand tax compliance
+  </Card>
+  <Card title="Inventory" icon="boxes-stacked" href="/modules/inventory">
+    Stock management integration
+  </Card>
+  <Card title="Accounting" icon="calculator" href="/modules/accounting">
+    Financial integration
+  </Card>
+</CardGroup>

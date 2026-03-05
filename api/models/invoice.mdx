@@ -1,0 +1,309 @@
+---
+title: 'Invoice'
+description: 'Model representing invoices generated from sales transactions'
+---
+
+## Overview
+
+The `Invoice` model represents invoices generated from sales transactions. It supports multiple format types (ticket, letter, route) for different printing scenarios and tracks invoice status throughout its lifecycle.
+
+**Namespace:** `App\Models\Sales\Invoice`
+
+**Database Table:** `invoices`
+
+**Traits:** `SoftDeletes`
+
+## Properties
+
+### Fillable Attributes
+
+<ParamField path="sale_id" type="integer" required>
+  Foreign key to the associated Sale model
+</ParamField>
+
+<ParamField path="invoice_number" type="string" required>
+  Unique invoice number for tracking and reference
+</ParamField>
+
+<ParamField path="type" type="string" required>
+  Type of invoice (e.g., 'standard', 'credit_note')
+</ParamField>
+
+<ParamField path="format_type" type="string" required>
+  Format for printing: 'ticket', 'letter', or 'route'
+</ParamField>
+
+<ParamField path="status" type="string" required>
+  Current status: 'active' or 'cancelled'
+</ParamField>
+
+<ParamField path="due_date" type="date">
+  Due date for payment (primarily for credit invoices)
+</ParamField>
+
+<ParamField path="generated_by" type="integer">
+  ID of the user who generated the invoice
+</ParamField>
+
+## Constants
+
+### Status Constants
+
+```php
+const STATUS_ACTIVE = 'active';
+const STATUS_CANCELLED = 'cancelled';
+```
+
+### Format Type Constants
+
+```php
+const FORMAT_TICKET = 'ticket'; // Plant / 80mm
+const FORMAT_LETTER = 'letter'; // Office / Credit
+const FORMAT_ROUTE  = 'route';  // Truck / 58mm
+```
+
+## Relationships
+
+### sale()
+
+Returns the sale associated with this invoice.
+
+<ResponseField name="sale" type="BelongsTo">
+  Returns a `Sale` model instance
+</ResponseField>
+
+```php
+$invoice->sale; // Sale object
+$invoice->sale->total_amount; // Sale total
+$invoice->sale->client; // Access client through sale
+```
+
+## Scopes
+
+### withIndexRelations()
+
+Eager loads necessary relationships for index pages and list views.
+
+```php
+Invoice::withIndexRelations()->get();
+```
+
+This scope loads:
+- `sale` (id, number, payment_type, client_id, total_amount)
+- `sale.client` (id, name)
+
+## Static Methods
+
+### getStatuses()
+
+Returns an array of available statuses with their human-readable labels.
+
+```php
+Invoice::getStatuses();
+// Returns:
+// [
+//   'active' => 'Vigente',
+//   'cancelled' => 'Anulada'
+// ]
+```
+
+### getFormats()
+
+Returns an array of available format types with their descriptions.
+
+```php
+Invoice::getFormats();
+// Returns:
+// [
+//   'ticket' => 'Ticket (80mm)',
+//   'letter' => 'Carta (Oficina)',
+//   'route' => 'Ruta (58mm)'
+// ]
+```
+
+### getStatusStyles()
+
+Returns Tailwind CSS classes for status badges in the UI.
+
+```php
+Invoice::getStatusStyles();
+// Returns:
+// [
+//   'active' => 'bg-emerald-100 text-emerald-700 border-emerald-200 ring-emerald-500/10',
+//   'cancelled' => 'bg-red-100 text-red-700 border-red-200 ring-red-500/10'
+// ]
+```
+
+### getFormatIcons()
+
+Returns Heroicon class names for format type icons.
+
+```php
+Invoice::getFormatIcons();
+// Returns:
+// [
+//   'ticket' => 'heroicon-s-printer',
+//   'letter' => 'heroicon-s-document-text',
+//   'route' => 'heroicon-s-truck'
+// ]
+```
+
+## Usage Examples
+
+### Creating an Invoice
+
+```php
+use App\Models\Sales\Invoice;
+
+$invoice = Invoice::create([
+    'sale_id' => $sale->id,
+    'invoice_number' => 'INV-2024-0001',
+    'type' => 'standard',
+    'format_type' => Invoice::FORMAT_TICKET,
+    'status' => Invoice::STATUS_ACTIVE,
+    'due_date' => now()->addDays(30),
+    'generated_by' => auth()->id()
+]);
+```
+
+### Querying Invoices
+
+```php
+// Get all active invoices with relationships
+$invoices = Invoice::withIndexRelations()
+    ->where('status', Invoice::STATUS_ACTIVE)
+    ->orderBy('created_at', 'desc')
+    ->get();
+
+// Access sale and client information
+foreach ($invoices as $invoice) {
+    echo $invoice->invoice_number;
+    echo $invoice->sale->number;
+    echo $invoice->sale->client->name;
+    echo $invoice->sale->total_amount;
+}
+```
+
+### Filtering by Format Type
+
+```php
+// Get all ticket format invoices
+$ticketInvoices = Invoice::where('format_type', Invoice::FORMAT_TICKET)
+    ->get();
+
+// Get letter format invoices for credit sales
+$letterInvoices = Invoice::where('format_type', Invoice::FORMAT_LETTER)
+    ->whereHas('sale', function ($query) {
+        $query->where('payment_type', 'credit');
+    })
+    ->get();
+```
+
+### Working with Invoice Status
+
+```php
+// Get status label
+$statuses = Invoice::getStatuses();
+$statusLabel = $statuses[$invoice->status]; // 'Vigente' or 'Anulada'
+
+// Get CSS classes for status badge
+$styles = Invoice::getStatusStyles();
+$badgeClass = $styles[$invoice->status];
+
+// Get format icon
+$icons = Invoice::getFormatIcons();
+$icon = $icons[$invoice->format_type];
+```
+
+### Cancelling an Invoice
+
+```php
+$invoice->status = Invoice::STATUS_CANCELLED;
+$invoice->save();
+```
+
+### Finding Invoices by Due Date
+
+```php
+// Get overdue invoices
+$overdueInvoices = Invoice::where('status', Invoice::STATUS_ACTIVE)
+    ->whereNotNull('due_date')
+    ->where('due_date', '<', now())
+    ->withIndexRelations()
+    ->get();
+
+// Get invoices due this week
+$dueThisWeek = Invoice::where('status', Invoice::STATUS_ACTIVE)
+    ->whereBetween('due_date', [now()->startOfWeek(), now()->endOfWeek()])
+    ->get();
+```
+
+### Format-Specific Operations
+
+```php
+// Generate print data based on format
+switch ($invoice->format_type) {
+    case Invoice::FORMAT_TICKET:
+        // 80mm thermal printer settings
+        $width = 80;
+        break;
+    case Invoice::FORMAT_LETTER:
+        // Standard letter size
+        $width = 216;
+        break;
+    case Invoice::FORMAT_ROUTE:
+        // 58mm portable printer
+        $width = 58;
+        break;
+}
+```
+
+### Generating Invoice Reports
+
+```php
+// Monthly invoice summary
+$monthlySummary = Invoice::where('status', Invoice::STATUS_ACTIVE)
+    ->whereMonth('created_at', now()->month)
+    ->whereYear('created_at', now()->year)
+    ->withIndexRelations()
+    ->get()
+    ->groupBy('format_type')
+    ->map(function ($group) {
+        return [
+            'count' => $group->count(),
+            'total' => $group->sum('sale.total_amount')
+        ];
+    });
+```
+
+## Format Type Use Cases
+
+### Ticket Format (80mm)
+
+Ideal for:
+- Point of sale terminals
+- Retail counter sales
+- Quick customer receipts
+- Thermal printers
+
+### Letter Format
+
+Ideal for:
+- Formal invoices
+- Credit sales
+- Office documentation
+- Archive copies
+
+### Route Format (58mm)
+
+Ideal for:
+- Mobile sales routes
+- Delivery trucks
+- Portable printers
+- Field sales
+
+## Related Models
+
+- [Sale](/api/models/sale) - Associated sales transaction
+- [Client](/api/models/client) - Customer information (via Sale)
+- [SaleItem](/api/models/sale-item) - Line items (via Sale)

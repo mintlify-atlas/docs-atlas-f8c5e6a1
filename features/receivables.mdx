@@ -1,0 +1,667 @@
+---
+title: Receivables (Accounts Receivable)
+description: Complete accounts receivable management with automatic balance tracking, aging reports, and payment application
+icon: 'file-invoice-dollar'
+---
+
+## Overview
+
+The Receivables system manages customer credit accounts, tracking outstanding invoices, payment applications, and account balances. It automatically integrates with the POS system for credit sales and generates journal entries for all financial transactions.
+
+<Info>
+  Receivables are automatically created when credit sales are processed through the POS.
+</Info>
+
+## Key Features
+
+- **Automatic creation** - Generated from credit sales with polymorphic references
+- **Balance tracking** - Real-time current balance updates with payment applications
+- **Status management** - Automatic status updates (Unpaid → Partial → Paid)
+- **Aging analysis** - Overdue detection based on due dates
+- **Journal integration** - All operations generate proper accounting entries
+- **Client balance sync** - Automatic client balance aggregation
+
+## Receivable Structure
+
+### Model Definition
+
+```php
+class Receivable extends Model
+{
+    use SoftDeletes, HasFactory;
+
+    const STATUS_UNPAID    = 'unpaid';
+    const STATUS_PARTIAL   = 'partial';
+    const STATUS_PAID      = 'paid';
+    const STATUS_CANCELLED = 'cancelled';
+
+    protected $fillable = [
+        'client_id',
+        'journal_entry_id',
+        'accounting_account_id',
+        'reference_type',        // Polymorphic: Sale, Invoice, etc.
+        'reference_id',          // ID of source document
+        'document_number',       // Display number (e.g., SALE-00123)
+        'description',
+        'total_amount',          // Original invoice amount
+        'current_balance',       // Remaining unpaid amount
+        'emission_date',         // Invoice date
+        'due_date',              // Payment deadline
+        'status'
+    ];
+
+    protected $casts = [
+        'emission_date'   => 'date',
+        'due_date'        => 'date',
+        'total_amount'    => 'decimal:2',
+        'current_balance' => 'decimal:2',
+    ];
+}
+```
+
+### Status Flow
+
+```
+┌─────────┐  Payment < Total   ┌─────────┐  Balance = 0   ┌──────┐
+│ UNPAID  │ ──────────────────> │ PARTIAL │ ────────────> │ PAID │
+└─────────┘                     └─────────┘               └──────┘
+     │                                │
+     │ Cancel (no payments)           │ Cancel (not allowed)
+     │                                │
+     ▼                                ▼
+┌───────────┐                    ┌─────────────────────┐
+│ CANCELLED │                    │ Error: Has payments │
+└───────────┘                    └─────────────────────┘
+```
+
+## Creating Receivables
+
+### Automatic Creation from Sales
+
+When a credit sale is processed:
+
+```php
+class SaleService
+{
+    public function create(array $data): Sale
+    {
+        return DB::transaction(function () use ($data) {
+            $sale = Sale::create([...]);
+
+            if ($sale->payment_type === Sale::PAYMENT_CREDIT) {
+                $this->receivableService->createReceivable([
+                    'client_id'       => $sale->client_id,
+                    'total_amount'    => $sale->total_amount,
+                    'emission_date'   => $sale->sale_date,
+                    'due_date'        => $sale->sale_date->copy()->addDays(30),
+                    'document_number' => $sale->number,
+                    'reference_type'  => Sale::class,
+                    'reference_id'    => $sale->id,
+                    'description'     => "Venta a crédito registrada desde POS"
+                ]);
+            }
+
+            return $sale;
+        });
+    }
+}
+```
+
+### Receivable Service Implementation
+
+```php
+class ReceivableService
+{
+    public function __construct(
+        protected JournalEntryService $journalService
+    ) {}
+
+    public function createReceivable(array $data): Receivable
+    {
+        return DB::transaction(function () use ($data) {
+            $client = Client::findOrFail($data['client_id']);
+            
+            // Determine account (use client's specific account or default)
+            $receivableAccountId = $client->accounting_account_id 
+                ?? $data['accounting_account_id'] 
+                ?? $this->getAccountIdByCode('1.1.02');
+
+            // Generate journal entry
+            $entry = $this->journalService->create([
+                'entry_date'  => $data['emission_date'],
+                'reference'   => $data['document_number'],
+                'description' => "Registro CxC: {$data['document_number']} - Cliente: {$client->name}",
+                'status'      => JournalEntry::STATUS_POSTED,
+                'items'       => [
+                    [
+                        'accounting_account_id' => $receivableAccountId,
+                        'debit'  => $data['total_amount'],
+                        'credit' => 0,
+                        'note'   => "Cargo de deuda"
+                    ],
+                    [
+                        'accounting_account_id' => $this->getAccountIdByCode('4.1'),
+                        'debit'  => 0,
+                        'credit' => $data['total_amount'],
+                        'note'   => "Contrapartida de ingreso"
+                    ]
+                ]
+            ]);
+
+            // Create receivable record
+            return Receivable::create([
+                'client_id'             => $data['client_id'],
+                'journal_entry_id'      => $entry->id,
+                'accounting_account_id' => $receivableAccountId,
+                'document_number'       => $data['document_number'],
+                'description'           => $data['description'] ?? "Registro CxC: {$data['document_number']}",
+                'total_amount'          => $data['total_amount'],
+                'current_balance'       => $data['total_amount'],  // Initially unpaid
+                'emission_date'         => $data['emission_date'],
+                'due_date'              => $data['due_date'],
+                'reference_type'        => $data['reference_type'],
+                'reference_id'          => $data['reference_id'],
+                'status'                => Receivable::STATUS_UNPAID,
+            ]);
+        });
+    }
+}
+```
+
+<Steps>
+  <Step title="Load Client Data">
+    Retrieve client information and determine appropriate receivables account
+  </Step>
+  <Step title="Create Journal Entry">
+    Generate accounting entry: Debit AR (1.1.02), Credit Revenue (4.1)
+  </Step>
+  <Step title="Create Receivable Record">
+    Register receivable with initial balance equal to total amount
+  </Step>
+</Steps>
+
+**Accounting Effect:**
+```
+Debit:  1.1.02 - Cuentas por Cobrar    $1,500.00
+Credit: 4.1    - Ingresos              $1,500.00
+```
+
+## Payment Application
+
+When customers make payments:
+
+```php
+class PaymentService
+{
+    public function createPayment(array $data): Payment
+    {
+        return DB::transaction(function () use ($data) {
+            $receivable = Receivable::findOrFail($data['receivable_id']);
+            
+            // Generate receipt number
+            $docType = DocumentType::where('code', 'PAG')->firstOrFail();
+            $receiptNumber = $docType->getNextNumberFormatted();
+
+            // Create journal entry for payment
+            $entry = $this->journalService->create([
+                'entry_date'  => $data['payment_date'],
+                'reference'   => $receiptNumber,
+                'description' => "Pago Recibido: {$receiptNumber} - Cliente: {$receivable->client->name}",
+                'status'      => JournalEntry::STATUS_POSTED,
+                'items'       => [
+                    [
+                        'accounting_account_id' => $this->getAccountIdByCode('1.1.01'),
+                        'debit'  => $data['amount'],
+                        'credit' => 0,
+                        'note'   => "Cobro según {$receiptNumber}"
+                    ],
+                    [
+                        'accounting_account_id' => $receivable->accounting_account_id,
+                        'debit'  => 0,
+                        'credit' => $data['amount'],
+                        'note'   => "Aplicación a factura {$receivable->document_number}"
+                    ]
+                ]
+            ]);
+
+            // Create payment record
+            $payment = Payment::create([
+                'client_id'        => $receivable->client_id,
+                'receivable_id'    => $receivable->id,
+                'tipo_pago_id'     => $data['tipo_pago_id'],
+                'journal_entry_id' => $entry->id,
+                'receipt_number'   => $receiptNumber,
+                'amount'           => $data['amount'],
+                'payment_date'     => $data['payment_date'],
+                'reference'        => $data['reference'] ?? null,
+                'note'             => $data['note'] ?? null,
+                'created_by'       => Auth::id(),
+                'status'           => Payment::STATUS_ACTIVE
+            ]);
+
+            // Increment receipt counter
+            $docType->increment('current_number');
+
+            // Update receivable balance and status
+            $receivable->current_balance -= $data['amount'];
+            $this->receivableService->updateStatusBasedOnBalance($receivable);
+            
+            // Update client's total balance
+            $receivable->client->refreshBalance();
+            
+            return $payment;
+        });
+    }
+}
+```
+
+**Accounting Effect:**
+```
+Debit:  1.1.01 - Caja                  $500.00
+Credit: 1.1.02 - Cuentas por Cobrar    $500.00
+```
+
+## Status Management
+
+### Automatic Status Updates
+
+```php
+public function updateStatusBasedOnBalance(Receivable $receivable): void
+{
+    if ($receivable->current_balance <= 0) {
+        $receivable->status = Receivable::STATUS_PAID;
+    } elseif ($receivable->current_balance < $receivable->total_amount) {
+        $receivable->status = Receivable::STATUS_PARTIAL;
+    } else {
+        $receivable->status = Receivable::STATUS_UNPAID;
+    }
+    
+    $receivable->save();
+}
+```
+
+### Status Examples
+
+```php
+// Receivable created: $1,000.00
+$receivable->total_amount    = 1000.00;
+$receivable->current_balance = 1000.00;
+$receivable->status          = 'unpaid';
+
+// After $300 payment
+$receivable->current_balance = 700.00;
+$receivable->status          = 'partial';
+
+// After $700 payment (total $1,000)
+$receivable->current_balance = 0.00;
+$receivable->status          = 'paid';
+```
+
+## Overdue Detection
+
+### Checking Overdue Status
+
+```php
+public function getIsOverdueAttribute(): bool
+{
+    // Paid or cancelled receivables are never overdue
+    if ($this->status === self::STATUS_PAID || 
+        $this->status === self::STATUS_CANCELLED) {
+        return false;
+    }
+
+    // Compare due date with today
+    $today = Carbon::now()->startOfDay();
+    $due = Carbon::parse($this->due_date)->startOfDay();
+
+    return $today->gt($due);
+}
+```
+
+Usage:
+
+```php
+$receivable = Receivable::find(1);
+
+if ($receivable->is_overdue) {
+    $daysOverdue = now()->diffInDays($receivable->due_date);
+    echo "Overdue by {$daysOverdue} days";
+}
+```
+
+### Aging Report Query
+
+```php
+// Get all overdue receivables
+$overdueReceivables = Receivable::whereIn('status', [
+        Receivable::STATUS_UNPAID,
+        Receivable::STATUS_PARTIAL
+    ])
+    ->where('due_date', '<', now())
+    ->with(['client'])
+    ->get();
+
+// Group by aging periods
+$aging = [
+    '1-30'   => [],
+    '31-60'  => [],
+    '61-90'  => [],
+    '90+'    => [],
+];
+
+foreach ($overdueReceivables as $receivable) {
+    $daysOverdue = now()->diffInDays($receivable->due_date);
+    
+    if ($daysOverdue <= 30) {
+        $aging['1-30'][] = $receivable;
+    } elseif ($daysOverdue <= 60) {
+        $aging['31-60'][] = $receivable;
+    } elseif ($daysOverdue <= 90) {
+        $aging['61-90'][] = $receivable;
+    } else {
+        $aging['90+'][] = $receivable;
+    }
+}
+```
+
+## Cancellation
+
+### Cancel Receivable
+
+```php
+public function cancelReceivable(Receivable $receivable): bool
+{
+    return DB::transaction(function () use ($receivable) {
+        if ($receivable->status === Receivable::STATUS_CANCELLED) {
+            return true;
+        }
+
+        // Cannot cancel if payments have been applied
+        if ($receivable->current_balance < $receivable->total_amount) {
+            throw new Exception("Cannot cancel a receivable with payments applied.");
+        }
+        
+        return $receivable->update([
+            'status' => Receivable::STATUS_CANCELLED,
+            'current_balance' => 0
+        ]);
+    });
+}
+```
+
+<Warning>
+  Receivables with partial or full payments cannot be cancelled. Payments must be reversed first.
+</Warning>
+
+### Sale Cancellation Integration
+
+```php
+public function cancel(Sale $sale, ?string $reason = null): bool
+{
+    return DB::transaction(function () use ($sale, $reason) {
+        // Cancel associated receivable
+        if ($sale->payment_type === Sale::PAYMENT_CREDIT) {
+            $receivable = Receivable::where('reference_type', Sale::class)
+                ->where('reference_id', $sale->id)
+                ->first();
+
+            if ($receivable) {
+                if ($receivable->current_balance < $receivable->total_amount || 
+                    $receivable->status === Receivable::STATUS_PAID) {
+                    throw new Exception("Cannot cancel: Client has made payments.");
+                }
+                $this->receivableService->cancelReceivable($receivable);
+            }
+        }
+
+        // ... continue with sale cancellation ...
+    });
+}
+```
+
+## Polymorphic References
+
+### Accessing Source Document
+
+```php
+class Receivable extends Model
+{
+    // Polymorphic relationship
+    public function reference(): MorphTo
+    {
+        return $this->morphTo();
+    }
+
+    // Convenient accessor for sales
+    public function getSaleAttribute()
+    {
+        return $this->reference_type === Sale::class 
+            ? $this->reference 
+            : null;
+    }
+}
+```
+
+Usage:
+
+```php
+$receivable = Receivable::with('reference')->find(1);
+
+// Access source sale
+if ($receivable->reference_type === Sale::class) {
+    $sale = $receivable->reference;
+    echo "Original sale: {$sale->number}";
+    echo "Sale date: {$sale->sale_date->format('d/m/Y')}";
+}
+
+// Or use accessor
+if ($receivable->sale) {
+    echo "Sale total: $" . number_format($receivable->sale->total_amount, 2);
+}
+```
+
+## Relationships
+
+```php
+class Receivable extends Model
+{
+    public function client(): BelongsTo 
+    { 
+        return $this->belongsTo(Client::class); 
+    }
+
+    public function journalEntry(): BelongsTo 
+    { 
+        return $this->belongsTo(JournalEntry::class); 
+    }
+
+    public function accountingAccount(): BelongsTo 
+    { 
+        return $this->belongsTo(AccountingAccount::class); 
+    }
+
+    public function reference(): MorphTo
+    {
+        return $this->morphTo();
+    }
+}
+```
+
+## Status Labels and Styles
+
+```php
+public static function getStatuses(): array
+{
+    return [
+        self::STATUS_UNPAID    => 'Pendiente',
+        self::STATUS_PARTIAL   => 'Abonado',
+        self::STATUS_PAID      => 'Pagado',
+        self::STATUS_CANCELLED => 'Anulado',
+    ];
+}
+
+public static function getStatusStyles(): array
+{
+    return [
+        self::STATUS_UNPAID    => 'bg-red-100 text-red-700 border-red-200 ring-red-500/10',
+        self::STATUS_PARTIAL   => 'bg-amber-100 text-amber-700 border-amber-200 ring-amber-500/10',
+        self::STATUS_PAID      => 'bg-emerald-100 text-emerald-700 border-emerald-200 ring-emerald-500/10',
+        self::STATUS_CANCELLED => 'bg-gray-100 text-gray-700 border-gray-200 ring-gray-500/10',
+    ];
+}
+
+public function getStatusLabelAttribute(): string
+{
+    return self::getStatuses()[$this->status] ?? $this->status;
+}
+```
+
+## Client Balance Tracking
+
+Clients maintain an aggregated balance of all receivables:
+
+```php
+class Client extends Model
+{
+    public function refreshBalance(): void
+    {
+        $this->current_balance = $this->receivables()
+            ->whereIn('status', [
+                Receivable::STATUS_UNPAID,
+                Receivable::STATUS_PARTIAL
+            ])
+            ->sum('current_balance');
+        
+        $this->save();
+    }
+
+    public function receivables(): HasMany
+    {
+        return $this->hasMany(Receivable::class);
+    }
+}
+```
+
+Automatic balance updates after payments:
+
+```php
+// After payment application
+$receivable->client->refreshBalance();
+```
+
+## Reports and Queries
+
+### Outstanding Receivables by Client
+
+```php
+$outstandingByClient = Receivable::whereIn('status', [
+        Receivable::STATUS_UNPAID,
+        Receivable::STATUS_PARTIAL
+    ])
+    ->select('client_id', DB::raw('SUM(current_balance) as total_outstanding'))
+    ->groupBy('client_id')
+    ->with('client:id,name')
+    ->get();
+```
+
+### Receivables Due This Week
+
+```php
+$dueThisWeek = Receivable::whereIn('status', [
+        Receivable::STATUS_UNPAID,
+        Receivable::STATUS_PARTIAL
+    ])
+    ->whereBetween('due_date', [
+        now()->startOfWeek(),
+        now()->endOfWeek()
+    ])
+    ->with(['client', 'reference'])
+    ->get();
+```
+
+### Payment History for Receivable
+
+```php
+$payments = Payment::where('receivable_id', $receivableId)
+    ->where('status', Payment::STATUS_ACTIVE)
+    ->with(['tipoPago', 'creator'])
+    ->latest('payment_date')
+    ->get();
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always Use Transactions">
+    Receivable creation involves multiple operations (receivable record + journal entry). Always wrap in `DB::transaction()`.
+  </Accordion>
+
+  <Accordion title="Validate Payment Amount">
+    Ensure payment amount doesn't exceed current balance:
+    ```php
+    if ($data['amount'] > $receivable->current_balance) {
+        throw new Exception("Payment exceeds outstanding balance.");
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Set Realistic Due Dates">
+    Configure default credit terms based on client relationship:
+    ```php
+    $daysCredit = $client->credit_days ?? 30;
+    $dueDate = $saleDate->copy()->addDays($daysCredit);
+    ```
+  </Accordion>
+
+  <Accordion title="Monitor Overdue Accounts">
+    Implement automatic alerts for overdue receivables:
+    ```php
+    $criticallyOverdue = Receivable::where('status', '!=', Receivable::STATUS_PAID)
+        ->where('due_date', '<', now()->subDays(60))
+        ->get();
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+### Receivable Balance Doesn't Match Payments
+
+**Cause:** Payment applied but balance not updated.
+
+**Solution:** Recalculate balance from payment history:
+```php
+$totalPaid = Payment::where('receivable_id', $receivable->id)
+    ->where('status', Payment::STATUS_ACTIVE)
+    ->sum('amount');
+
+$correctBalance = $receivable->total_amount - $totalPaid;
+$receivable->update(['current_balance' => $correctBalance]);
+$receivableService->updateStatusBasedOnBalance($receivable);
+```
+
+### Client Balance Out of Sync
+
+**Cause:** Receivable updated but client balance not refreshed.
+
+**Solution:**
+```php
+$client->refreshBalance();
+```
+
+### Cannot Cancel Receivable with Payments
+
+**Cause:** Payments have been applied.
+
+**Solution:** Reverse payments first:
+```php
+$payments = Payment::where('receivable_id', $receivable->id)
+    ->where('status', Payment::STATUS_ACTIVE)
+    ->get();
+
+foreach ($payments as $payment) {
+    $paymentService->cancelPayment($payment);
+}
+
+$receivableService->cancelReceivable($receivable);
+```

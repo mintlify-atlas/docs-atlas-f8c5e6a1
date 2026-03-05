@@ -1,0 +1,452 @@
+---
+title: "Inventory Module"
+description: "Real-time inventory tracking across multiple warehouses with automated stock adjustments"
+---
+
+## Overview
+
+The Inventory module provides comprehensive stock management across multiple warehouses. It automatically tracks all inventory movements, maintains stock levels, and provides detailed audit trails for compliance and analysis.
+
+<CardGroup cols={3}>
+  <Card title="Multi-Warehouse" icon="warehouse">
+    Manage stock across multiple locations
+  </Card>
+  <Card title="Auto Adjustments" icon="arrows-rotate">
+    Automatic updates from sales and purchases
+  </Card>
+  <Card title="Audit Trail" icon="list-check">
+    Complete movement history
+  </Card>
+</CardGroup>
+
+## Core Components
+
+### Inventory Stock
+
+Tracks the current quantity of each product in each warehouse.
+
+```php app/Models/Inventory/InventoryStock.php
+class InventoryStock extends Model
+{
+    protected $fillable = [
+        'warehouse_id',
+        'product_id',
+        'quantity',
+        'min_stock'
+    ];
+
+    public function warehouse(): BelongsTo {
+        return $this->belongsTo(Warehouse::class);
+    }
+
+    public function product(): BelongsTo {
+        return $this->belongsTo(Product::class);
+    }
+}
+```
+
+**Key Fields:**
+- `warehouse_id` - The warehouse location
+- `product_id` - The product being tracked
+- `quantity` - Current stock level
+- `min_stock` - Minimum threshold for low stock alerts
+
+### Inventory Movements
+
+Records every change in inventory with complete audit information.
+
+```php app/Models/Inventory/InventoryMovement.php
+const TYPE_INPUT      = 'input';       // Compras, Producción
+const TYPE_OUTPUT     = 'output';      // Ventas, Consumo
+const TYPE_ADJUSTMENT = 'adjustment';  // Correcciones, Mermas
+const TYPE_TRANSFER   = 'transfer';    // Entre almacenes
+
+protected $fillable = [
+    'warehouse_id',
+    'product_id',
+    'quantity',
+    'type',
+    'unit_cost',
+    'description',
+    'reference_type',  // Polymorphic: Sale, Purchase, etc.
+    'reference_id',
+];
+```
+
+## Movement Types
+
+<Tabs>
+  <Tab title="Input">
+    **Input movements** increase stock levels. Common scenarios:
+
+    - **Purchases** from suppliers
+    - **Production** of manufactured goods
+    - **Returns** from customers
+    - **Initial stock** setup
+
+    ```php
+    $this->inventoryService->register([
+        'warehouse_id' => $warehouseId,
+        'product_id'   => $productId,
+        'quantity'     => 100,
+        'type'         => InventoryMovement::TYPE_INPUT,
+        'unit_cost'    => 50.00,
+        'description'  => 'Purchase PO-2024-001',
+    ]);
+    ```
+
+    **Accounting Entry:**
+    ```
+    Debit:  Inventory (1.2.01)        $5,000
+    Credit: Accounts Payable (2.1.01) $5,000
+    ```
+  </Tab>
+  <Tab title="Output">
+    **Output movements** decrease stock levels. Common scenarios:
+
+    - **Sales** to customers
+    - **Consumption** for production
+    - **Damaged goods** write-off
+
+    ```php
+    $this->inventoryService->register([
+        'warehouse_id'   => $warehouseId,
+        'product_id'     => $productId,
+        'quantity'       => 10,
+        'type'           => InventoryMovement::TYPE_OUTPUT,
+        'description'    => 'Sale FAC-2024-001',
+        'reference_type' => Sale::class,
+        'reference_id'   => $saleId,
+    ]);
+    ```
+
+    **Accounting Entry:**
+    ```
+    Debit:  Cost of Goods Sold (5.1)   $500
+    Credit: Inventory (1.2.01)         $500
+    ```
+  </Tab>
+  <Tab title="Adjustment">
+    **Adjustment movements** correct stock discrepancies. Common scenarios:
+
+    - **Physical count** reconciliation
+    - **Damage** or spoilage
+    - **Theft** or loss
+    - **Reversals** from canceled sales
+
+    ```php
+    $this->inventoryService->register([
+        'warehouse_id' => $warehouseId,
+        'product_id'   => $productId,
+        'quantity'     => 5,  // Positive = increase, Negative = decrease
+        'type'         => InventoryMovement::TYPE_ADJUSTMENT,
+        'description'  => 'Physical count adjustment',
+    ]);
+    ```
+
+    **Accounting Entry (Loss):**
+    ```
+    Debit:  Inventory Variance (5.3)   $250
+    Credit: Inventory (1.2.01)         $250
+    ```
+  </Tab>
+  <Tab title="Transfer">
+    **Transfer movements** move stock between warehouses. This creates two movements:
+
+    - **Output** from source warehouse
+    - **Input** to destination warehouse
+
+    ```php
+    // This is handled automatically by the service
+    $this->inventoryService->register([
+        'warehouse_id'          => $sourceWarehouseId,
+        'product_id'            => $productId,
+        'quantity'              => 20,
+        'type'                  => InventoryMovement::TYPE_TRANSFER,
+        'destination_warehouse' => $destWarehouseId,
+        'description'           => 'Transfer to Main Warehouse',
+    ]);
+    ```
+
+    **No accounting entry** - just moves stock between locations.
+  </Tab>
+</Tabs>
+
+## Inventory Service
+
+The `InventoryMovementService` handles all stock operations with automatic accounting integration.
+
+### Register Movement
+
+```php app/Services/Inventory/InventoryMovementService.php
+public function register(array $data): InventoryMovement
+{
+    return DB::transaction(function () use ($data) {
+        $movement = InventoryMovement::create($data);
+
+        // Update stock level
+        $stock = InventoryStock::firstOrCreate(
+            [
+                'warehouse_id' => $data['warehouse_id'],
+                'product_id'   => $data['product_id'],
+            ],
+            ['quantity' => 0]
+        );
+
+        // Adjust quantity based on movement type
+        if ($data['type'] === InventoryMovement::TYPE_OUTPUT) {
+            $stock->decrement('quantity', $data['quantity']);
+        } else {
+            $stock->increment('quantity', $data['quantity']);
+        }
+
+        // Generate accounting entry if applicable
+        if ($this->shouldGenerateAccounting($data['type'])) {
+            $this->generateAccountingEntry($movement);
+        }
+
+        return $movement;
+    });
+}
+```
+
+### Stock Validation
+
+Before creating output movements, the system validates stock availability:
+
+```php
+$currentStock = InventoryStock::where('warehouse_id', $warehouseId)
+    ->where('product_id', $productId)
+    ->value('quantity') ?? 0;
+
+if ($currentStock < $requestedQuantity) {
+    throw new \Exception(
+        "Stock insuficiente. Disponible: {$currentStock}"
+    );
+}
+```
+
+<Warning>
+  Output movements will fail if insufficient stock is available. Use adjustments for corrections.
+</Warning>
+
+## Warehouses
+
+The system supports multiple warehouse locations:
+
+```php app/Models/Inventory/Warehouse.php
+protected $fillable = [
+    'name',
+    'code',
+    'location',
+    'is_active',
+];
+
+public function stocks(): HasMany {
+    return $this->hasMany(InventoryStock::class);
+}
+
+public function movements(): HasMany {
+    return $this->hasMany(InventoryMovement::class);
+}
+```
+
+### Common Warehouse Setups
+
+<AccordionGroup>
+  <Accordion title="Single Location">
+    Simple businesses with one warehouse:
+    - **Main Warehouse** - All products stored here
+  </Accordion>
+  <Accordion title="Multi-Location">
+    Businesses with multiple sales locations:
+    - **Main Warehouse** - Primary storage
+    - **Store 1** - Retail location
+    - **Store 2** - Retail location
+  </Accordion>
+  <Accordion title="Distribution">
+    Distribution businesses:
+    - **Central** - Main distribution center
+    - **North** - Regional warehouse
+    - **South** - Regional warehouse
+    - **Transit** - In-transit goods
+  </Accordion>
+</AccordionGroup>
+
+## Stock Queries
+
+### Current Stock Levels
+
+```php
+// Stock for a specific product in a warehouse
+$stock = InventoryStock::where('warehouse_id', $warehouseId)
+    ->where('product_id', $productId)
+    ->first();
+
+echo "Current quantity: {$stock->quantity}";
+```
+
+### Low Stock Alerts
+
+```php
+// Products below minimum stock level
+$lowStock = InventoryStock::whereColumn('quantity', '<', 'min_stock')
+    ->with('product', 'warehouse')
+    ->get();
+```
+
+### Stock Value
+
+```php
+// Total inventory value by warehouse
+$value = InventoryStock::where('warehouse_id', $warehouseId)
+    ->join('products', 'products.id', '=', 'inventory_stocks.product_id')
+    ->selectRaw('SUM(inventory_stocks.quantity * products.cost) as total_value')
+    ->value('total_value');
+```
+
+### Movement History
+
+```php
+// All movements for a product
+$movements = InventoryMovement::where('product_id', $productId)
+    ->with('warehouse')
+    ->latest()
+    ->get();
+
+// Movements within date range
+$movements = InventoryMovement::whereBetween('created_at', [$startDate, $endDate])
+    ->where('type', InventoryMovement::TYPE_OUTPUT)
+    ->get();
+```
+
+## Reporting
+
+### Stock Report
+
+View current stock levels across all warehouses:
+
+```php
+$stockReport = InventoryStock::with(['product', 'warehouse'])
+    ->where('quantity', '>', 0)
+    ->get()
+    ->groupBy('warehouse.name');
+```
+
+### Movement Report
+
+Track all inventory activity:
+
+```php
+$movements = InventoryMovement::with(['product', 'warehouse'])
+    ->whereBetween('created_at', [$startDate, $endDate])
+    ->latest()
+    ->get();
+```
+
+### Excel Export
+
+```php app/Http/Controllers/Inventory/InventoryStockController.php
+public function export(Request $request)
+{
+    $query = (new InventoryFilters($request))
+        ->apply(InventoryStock::query());
+
+    return Excel::download(new InventoryStockExport($query), 'stock.xlsx');
+}
+```
+
+## Integration Points
+
+### Sales Module
+
+When a sale is created, inventory is automatically reduced:
+
+```php app/Services/Sales/SalesServices/SaleService.php
+foreach ($data['items'] as $item) {
+    $this->inventoryService->register([
+        'warehouse_id'   => $data['warehouse_id'],
+        'product_id'     => $item['product_id'],
+        'quantity'       => $item['quantity'],
+        'type'           => InventoryMovement::TYPE_OUTPUT,
+        'reference_type' => Sale::class,
+        'reference_id'   => $sale->id,
+    ]);
+}
+```
+
+### Accounting Module
+
+Inventory movements generate journal entries for proper cost tracking:
+
+- **Inputs** increase inventory asset and create payable/expense
+- **Outputs** recognize cost of goods sold
+- **Adjustments** account for variance
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Polymorphic References">
+    Always link movements to their source document:
+
+    ```php
+    'reference_type' => Sale::class,
+    'reference_id'   => $sale->id,
+    ```
+
+    This provides complete audit trails and enables reversals.
+  </Accordion>
+  <Accordion title="Set Minimum Stock Levels">
+    Configure `min_stock` for each product-warehouse combination:
+
+    ```php
+    InventoryStock::updateOrCreate(
+        ['product_id' => $productId, 'warehouse_id' => $warehouseId],
+        ['min_stock' => 10]
+    );
+    ```
+  </Accordion>
+  <Accordion title="Regular Physical Counts">
+    Perform periodic physical counts and use adjustments to reconcile:
+
+    ```php
+    $systemQty = $stock->quantity;
+    $physicalQty = 95;  // From count
+    $variance = $physicalQty - $systemQty;
+
+    if ($variance != 0) {
+        $this->inventoryService->register([
+            'type' => InventoryMovement::TYPE_ADJUSTMENT,
+            'quantity' => abs($variance),
+            'description' => 'Physical count adjustment',
+        ]);
+    }
+    ```
+  </Accordion>
+  <Accordion title="Monitor Negative Stock">
+    Prevent negative stock situations:
+
+    ```php
+    if ($stock->quantity < $requestedQty) {
+        throw new \Exception('Insufficient stock');
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Sales Module" icon="chart-line" href="/modules/sales">
+    How sales integrate with inventory
+  </Card>
+  <Card title="Products Module" icon="box" href="/modules/products">
+    Product configuration
+  </Card>
+  <Card title="Accounting" icon="calculator" href="/modules/accounting">
+    Financial integration
+  </Card>
+  <Card title="Inventory Service API" icon="code" href="/api/services/inventory-movement-service">
+    Service implementation details
+  </Card>
+</CardGroup>

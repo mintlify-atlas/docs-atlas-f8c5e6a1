@@ -1,0 +1,419 @@
+---
+title: 'Product'
+description: 'Model representing products and inventory items in the system'
+---
+
+## Overview
+
+The `Product` model represents products and inventory items in the ERP system. It manages product information, pricing, categories, units of measurement, and integrates with the inventory management system.
+
+**Namespace:** `App\Models\Products\Product`
+
+**Database Table:** `products`
+
+**Traits:** `SoftDeletes`
+
+## Properties
+
+### Fillable Attributes
+
+<ParamField path="category_id" type="integer" required>
+  Foreign key to the Category model
+</ParamField>
+
+<ParamField path="unit_id" type="integer" required>
+  Foreign key to the Unit model (measurement unit)
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Product name
+</ParamField>
+
+<ParamField path="slug" type="string" required>
+  URL-friendly version of the product name
+</ParamField>
+
+<ParamField path="sku" type="string" required>
+  Stock Keeping Unit - unique product identifier
+</ParamField>
+
+<ParamField path="description" type="text">
+  Detailed product description
+</ParamField>
+
+<ParamField path="image_path" type="string">
+  Path to the product image file
+</ParamField>
+
+<ParamField path="price" type="decimal" required>
+  Selling price of the product
+</ParamField>
+
+<ParamField path="cost" type="decimal" required>
+  Cost price of the product
+</ParamField>
+
+<ParamField path="is_active" type="boolean" default="true">
+  Whether the product is active and available for sale
+</ParamField>
+
+<ParamField path="is_stockable" type="boolean" default="true">
+  Whether the product requires inventory tracking
+</ParamField>
+
+## Relationships
+
+### category()
+
+Returns the category this product belongs to.
+
+<ResponseField name="category" type="BelongsTo">
+  Returns a `Category` model instance
+</ResponseField>
+
+```php
+$product->category; // Category object
+$product->category->name; // Category name
+```
+
+### unit()
+
+Returns the unit of measurement for this product.
+
+<ResponseField name="unit" type="BelongsTo">
+  Returns a `Unit` model instance
+</ResponseField>
+
+```php
+$product->unit; // Unit object
+$product->unit->name; // 'Unidad', 'Caja', 'Litro', etc.
+$product->unit->abbreviation; // 'un', 'cj', 'lt', etc.
+```
+
+### stocks()
+
+Returns stock information across all warehouses.
+
+<ResponseField name="stocks" type="HasMany">
+  Returns a collection of `InventoryStock` models
+</ResponseField>
+
+```php
+$product->stocks; // Collection of InventoryStock objects
+```
+
+## Accessors
+
+### formattedPrice
+
+Returns the product price formatted with currency symbol.
+
+```php
+$product->formattedPrice; // '$ 150.00'
+```
+
+**Implementation:**
+```php
+public function getFormattedPriceAttribute(): string
+{
+    $config = general_config();
+    $symbol = $config->currency_symbol ?? '$';
+    
+    return $symbol . ' ' . number_format($this->price, 2);
+}
+```
+
+### totalStock
+
+Returns the total stock quantity across all warehouses.
+
+```php
+$product->totalStock; // Sum of all warehouse stocks
+```
+
+**Implementation:**
+```php
+public function getTotalStockAttribute()
+{
+    return $this->stocks()->sum('quantity');
+}
+```
+
+## Scopes
+
+### withIndexRelations()
+
+Eager loads relationships needed for index pages and list views.
+
+```php
+Product::withIndexRelations()->get();
+```
+
+This scope loads:
+- `category` (id, name)
+- `unit` (id, name, abbreviation)
+
+### activo()
+
+Filters only active products.
+
+```php
+Product::activo()->get();
+```
+
+**Implementation:**
+```php
+public function scopeActivo(Builder $query): Builder
+{
+    return $query->where('is_active', true);
+}
+```
+
+### inactivo()
+
+Filters only inactive products.
+
+```php
+Product::inactivo()->get();
+```
+
+**Implementation:**
+```php
+public function scopeInactivo(Builder $query): Builder
+{
+    return $query->where('is_active', false);
+}
+```
+
+### stockable()
+
+Filters only products that require inventory tracking.
+
+```php
+Product::stockable()->get();
+```
+
+**Implementation:**
+```php
+public function scopeStockable(Builder $query): Builder
+{
+    return $query->where('is_stockable', true);
+}
+```
+
+## Usage Examples
+
+### Creating a Product
+
+```php
+use App\Models\Products\Product;
+
+$product = Product::create([
+    'category_id' => 1,
+    'unit_id' => 1,
+    'name' => 'Producto Premium',
+    'slug' => 'producto-premium',
+    'sku' => 'PRD-001',
+    'description' => 'Descripción detallada del producto',
+    'price' => 150.00,
+    'cost' => 90.00,
+    'is_active' => true,
+    'is_stockable' => true
+]);
+```
+
+### Querying Products
+
+```php
+// Get all active products with relationships
+$products = Product::activo()
+    ->withIndexRelations()
+    ->orderBy('name')
+    ->get();
+
+// Access product data
+foreach ($products as $product) {
+    echo $product->name;
+    echo $product->sku;
+    echo $product->formattedPrice;
+    echo $product->category->name;
+    echo $product->unit->abbreviation;
+}
+```
+
+### Working with Product Stock
+
+```php
+// Get total stock across all warehouses
+$totalStock = $product->totalStock;
+
+// Get stock by warehouse
+$stocks = $product->stocks()->with('warehouse')->get();
+foreach ($stocks as $stock) {
+    echo $stock->warehouse->name . ': ' . $stock->quantity;
+}
+
+// Check if product is in stock
+if ($product->totalStock > 0) {
+    // Product available
+} else {
+    // Out of stock
+}
+```
+
+### Filtering Products by Category
+
+```php
+// Get products in specific category
+$categoryProducts = Product::where('category_id', $categoryId)
+    ->activo()
+    ->get();
+
+// Get products with category name
+$products = Product::withIndexRelations()
+    ->whereHas('category', function ($query) {
+        $query->where('name', 'Electronics');
+    })
+    ->get();
+```
+
+### Price and Margin Calculations
+
+```php
+// Calculate profit margin
+$margin = $product->price - $product->cost;
+$marginPercentage = (($product->price - $product->cost) / $product->cost) * 100;
+
+echo "Margin: {$margin}";
+echo "Margin %: {$marginPercentage}%";
+
+// Get products by price range
+$expensiveProducts = Product::where('price', '>=', 1000)
+    ->activo()
+    ->get();
+```
+
+### Managing Product Status
+
+```php
+// Activate product
+$product->is_active = true;
+$product->save();
+
+// Deactivate product
+$product->is_active = false;
+$product->save();
+
+// Get inactive products
+$inactiveProducts = Product::inactivo()->get();
+```
+
+### Stockable vs Non-Stockable Products
+
+```php
+// Get only stockable products
+$stockableProducts = Product::stockable()->get();
+
+// Get service-type products (non-stockable)
+$services = Product::where('is_stockable', false)->get();
+
+// Create a service product
+$service = Product::create([
+    'name' => 'Installation Service',
+    'sku' => 'SRV-001',
+    'price' => 500.00,
+    'cost' => 0.00,
+    'is_stockable' => false, // No inventory tracking needed
+    'category_id' => $serviceCategory->id,
+    'unit_id' => $serviceUnit->id
+]);
+```
+
+### Product Search
+
+```php
+// Search products by name or SKU
+$searchTerm = 'premium';
+$results = Product::activo()
+    ->where(function ($query) use ($searchTerm) {
+        $query->where('name', 'LIKE', "%{$searchTerm}%")
+              ->orWhere('sku', 'LIKE', "%{$searchTerm}%");
+    })
+    ->withIndexRelations()
+    ->get();
+```
+
+### Low Stock Products
+
+```php
+// Get products with low stock
+$lowStockProducts = Product::stockable()
+    ->whereHas('stocks', function ($query) {
+        $query->whereRaw('quantity <= min_stock');
+    })
+    ->with('stocks')
+    ->get();
+
+foreach ($lowStockProducts as $product) {
+    foreach ($product->stocks as $stock) {
+        if ($stock->quantity <= $stock->min_stock) {
+            echo "{$product->name} low in {$stock->warehouse->name}";
+        }
+    }
+}
+```
+
+### Product Sales Analysis
+
+```php
+// Get best-selling products
+$bestSellers = Product::withCount(['saleItems' => function ($query) {
+        $query->whereHas('sale', function ($q) {
+            $q->where('status', 'completed')
+              ->whereMonth('sale_date', now()->month);
+        });
+    }])
+    ->orderBy('sale_items_count', 'desc')
+    ->take(10)
+    ->get();
+```
+
+### Bulk Operations
+
+```php
+// Update prices by percentage
+Product::where('category_id', $categoryId)
+    ->each(function ($product) {
+        $product->price = $product->price * 1.10; // 10% increase
+        $product->save();
+    });
+
+// Deactivate out-of-stock products
+Product::stockable()
+    ->whereDoesntHave('stocks', function ($query) {
+        $query->where('quantity', '>', 0);
+    })
+    ->update(['is_active' => false]);
+```
+
+### Product with Image
+
+```php
+// Store product with image
+$product = Product::create([
+    'name' => 'Product with Image',
+    'sku' => 'PRD-IMG-001',
+    'image_path' => $request->file('image')->store('products', 'public'),
+    // ... other fields
+]);
+
+// Get image URL
+$imageUrl = Storage::url($product->image_path);
+```
+
+## Related Models
+
+- [Category](/api/models/category) - Product categorization
+- [Unit](/api/models/unit) - Measurement units
+- [InventoryStock](/api/models/inventory) - Stock levels by warehouse
+- [SaleItem](/api/models/sale-item) - Products in sales transactions

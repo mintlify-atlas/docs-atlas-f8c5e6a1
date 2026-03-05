@@ -1,0 +1,688 @@
+---
+title: Excel Exports
+description: Professional Excel report generation with custom formatting, styling, and optimized performance for large datasets
+icon: 'file-excel'
+---
+
+## Overview
+
+The Export system leverages Laravel Excel (Maatwebsite) to generate professional Excel reports with custom formatting, column styling, and optimized performance. All major modules support filtered exports with consistent styling and proper data formatting.
+
+<Info>
+  Exports automatically apply active filters, allowing users to export exactly what they see on screen.
+</Info>
+
+## Architecture
+
+Exports are implemented using Laravel Excel's concern-based architecture:
+
+```php
+use Maatwebsite\Excel\Concerns\{
+    FromQuery,           // Query-based data source
+    WithHeadings,        // Column headers
+    WithMapping,         // Data transformation
+    WithStyles,          // Cell formatting
+    WithDefaultStyles,   // Base styling
+    WithColumnWidths     // Column dimensions
+};
+```
+
+## Basic Export Structure
+
+### Complete Export Implementation
+
+```php
+namespace App\Exports\Sales;
+
+use App\Models\Sales\Sale;
+use Maatwebsite\Excel\Concerns\{FromQuery, WithHeadings, WithMapping, WithStyles, WithDefaultStyles, WithColumnWidths};
+use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
+use PhpOffice\PhpSpreadsheet\Style\{Style, Fill, Alignment, Border};
+
+class SalesExport implements FromQuery, WithHeadings, WithMapping, WithStyles, WithDefaultStyles, WithColumnWidths
+{
+    protected $query;
+    private $clientsCache = [];
+    private $statusLabels = [];
+
+    public function __construct($query)
+    {
+        $this->query = $query;
+        
+        // Cache catalogs to optimize mapping performance
+        $this->clientsCache = Client::pluck('name', 'id')->toArray();
+        $this->statusLabels = Sale::getStatuses();
+    }
+
+    /**
+     * Query filtered data
+     */
+    public function query()
+    {
+        return $this->query
+            ->select(['id', 'number', 'created_at', 'client_id', 'total_amount', 'status'])
+            ->latest('sale_date');
+    }
+
+    /**
+     * Define column headers
+     */
+    public function headings(): array
+    {
+        return [
+            'ID',
+            'Número Doc',
+            'Fecha',
+            'Cliente',
+            'Total Venta',
+            'Estado',
+        ];
+    }
+
+    /**
+     * Map each row to Excel format
+     */
+    public function map($sale): array
+    {
+        return [
+            $sale->id,
+            $sale->number,
+            $sale->created_at->format('d/m/Y H:i'),
+            $this->clientsCache[$sale->client_id] ?? 'N/A',
+            $sale->total_amount,
+            $this->statusLabels[$sale->status] ?? $sale->status,
+        ];
+    }
+
+    /**
+     * Set column widths
+     */
+    public function columnWidths(): array
+    {
+        return [
+            'A' => 8,   // ID
+            'B' => 15,  // Number
+            'C' => 20,  // Date
+            'D' => 35,  // Client
+            'E' => 18,  // Amount
+            'F' => 15,  // Status
+        ];
+    }
+
+    /**
+     * Default cell styling
+     */
+    public function defaultStyles(Style $defaultStyle)
+    {
+        return [
+            'font' => ['name' => 'Segoe UI', 'size' => 10],
+            'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
+        ];
+    }
+
+    /**
+     * Custom styles for specific ranges
+     */
+    public function styles(Worksheet $sheet)
+    {
+        // Header styling (Indigo 600)
+        $sheet->getStyle('A1:F1')->applyFromArray([
+            'font' => ['bold' => true, 'color' => ['argb' => 'FFFFFF']],
+            'fill' => [
+                'fillType' => Fill::FILL_SOLID, 
+                'startColor' => ['argb' => '4F46E5']
+            ],
+            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER],
+        ]);
+
+        $lastRow = $sheet->getHighestRow();
+
+        // Currency formatting for amount column
+        $sheet->getStyle('E2:E' . $lastRow)
+            ->getNumberFormat()
+            ->setFormatCode('"$"#,##0.00');
+
+        // Table borders
+        $sheet->getStyle('A1:F' . $lastRow)->applyFromArray([
+            'borders' => [
+                'allBorders' => [
+                    'borderStyle' => Border::BORDER_THIN,
+                    'color' => ['argb' => 'E5E7EB'],
+                ],
+            ],
+        ]);
+
+        return [];
+    }
+}
+```
+
+<Steps>
+  <Step title="Initialize Cache">
+    Load reference data (clients, statuses) into memory to avoid N+1 queries during mapping
+  </Step>
+  <Step title="Define Query">
+    Specify which columns to select and apply ordering
+  </Step>
+  <Step title="Map Data">
+    Transform each row from database format to Excel display format
+  </Step>
+  <Step title="Apply Styling">
+    Format headers, numbers, and borders for professional appearance
+  </Step>
+</Steps>
+
+## Controller Implementation
+
+### Export with Active Filters
+
+```php
+class SaleController extends Controller
+{
+    public function export(Request $request)
+    {
+        // Apply the same filters used in index view
+        $query = (new SaleFilters($request))
+            ->apply(Sale::query());
+
+        $fileName = 'reporte-ventas-' . now()->format('d-m-Y-H-i') . '.xlsx';
+
+        return Excel::download(new SalesExport($query), $fileName);
+    }
+}
+```
+
+### Route Definition
+
+```php
+Route::get('/sales/export', [SaleController::class, 'export'])
+    ->name('sales.export');
+```
+
+### Frontend Trigger
+
+```html
+<form action="{{ route('sales.export') }}" method="GET">
+    <!-- Include current filter values as hidden inputs -->
+    <input type="hidden" name="status" value="{{ request('status') }}">
+    <input type="hidden" name="date_from" value="{{ request('date_from') }}">
+    <input type="hidden" name="date_to" value="{{ request('date_to') }}">
+    
+    <button type="submit" class="btn btn-success">
+        <i class="fas fa-file-excel"></i> Exportar a Excel
+    </button>
+</form>
+```
+
+## Common Export Examples
+
+### Sales Export
+
+```php
+class SalesExport implements FromQuery, WithHeadings, WithMapping
+{
+    public function headings(): array
+    {
+        return [
+            'ID',
+            'Número Doc',
+            'Fecha',
+            'Cliente',
+            'Almacén',
+            'Tipo de Pago',
+            'Total Venta',
+            'Estado',
+            'Vendedor',
+            'Observaciones'
+        ];
+    }
+
+    public function map($sale): array
+    {
+        return [
+            $sale->id,
+            $sale->number,
+            $sale->created_at->format('d/m/Y H:i'),
+            $this->clientsCache[$sale->client_id] ?? 'N/A',
+            $this->warehousesCache[$sale->warehouse_id] ?? 'N/A',
+            $this->paymentLabels[$sale->payment_type] ?? $sale->payment_type,
+            $sale->total_amount,
+            $this->statusLabels[$sale->status] ?? $sale->status,
+            $this->usersCache[$sale->user_id] ?? 'Sistema',
+            $sale->notes ?? '',
+        ];
+    }
+}
+```
+
+### Journal Entries Export
+
+```php
+class JournalEntriesExport implements FromQuery, WithHeadings, WithMapping
+{
+    public function query()
+    {
+        return $this->query->with(['creator']);
+    }
+
+    public function headings(): array
+    {
+        return [
+            'ID',
+            'Fecha Contable',
+            'Número de Asiento',
+            'Referencia',
+            'Concepto / Glosa',
+            'Total Débito',
+            'Total Crédito',
+            'Estado',
+            'Registrado por',
+            'Fecha de Creación'
+        ];
+    }
+
+    public function map($entry): array
+    {
+        return [
+            $entry->id,
+            $entry->entry_date->format('d/m/Y'),
+            '#' . str_pad($entry->id, 6, '0', STR_PAD_LEFT),
+            $entry->reference ?? 'N/A',
+            $entry->description,
+            $entry->total_debit,
+            $entry->total_credit,
+            $this->statuses[$entry->status] ?? $entry->status,
+            $entry->creator->name ?? 'Sistema',
+            $entry->created_at->format('d/m/Y H:i'),
+        ];
+    }
+}
+```
+
+### NCF Logs Export (DGII Compliance)
+
+```php
+class NcfLogsExport implements FromQuery, WithHeadings, WithMapping
+{
+    public function query()
+    {
+        return $this->query->with(['sale.client', 'type', 'user']);
+    }
+
+    public function headings(): array
+    {
+        return [
+            'Fecha',
+            'NCF',
+            'Tipo',
+            'Venta #',
+            'RNC/Cédula',
+            'Cliente',
+            'Monto',
+            'ITBIS',
+            'Estado'
+        ];
+    }
+
+    public function map($log): array
+    {
+        return [
+            $log->created_at->format('d/m/Y'),
+            $log->full_ncf,
+            $log->type->name,
+            $log->sale->number,
+            $log->sale->client->tax_id ?? 'N/A',
+            $log->sale->client->name,
+            $log->sale->total_amount,
+            $log->sale->total_amount * 0.18, // ITBIS 18%
+            $log->status == 'used' ? 'Utilizado' : 'Anulado'
+        ];
+    }
+}
+```
+
+### Payments Export
+
+```php
+class PaymentsExport implements FromQuery, WithHeadings, WithMapping
+{
+    public function query()
+    {
+        return $this->query->with(['client', 'receivable', 'tipoPago', 'creator']);
+    }
+
+    public function headings(): array
+    {
+        return [
+            'ID',
+            'Fecha Pago',
+            'No. Recibo',
+            'Cliente',
+            'Factura Aplicada',
+            'Método de Pago',
+            'Referencia',
+            'Monto Pagado',
+            'Estado',
+            'Registrado por',
+            'Nota'
+        ];
+    }
+
+    public function map($payment): array
+    {
+        return [
+            $payment->id,
+            $payment->payment_date->format('d/m/Y'),
+            $payment->receipt_number,
+            $payment->client->name,
+            $payment->receivable->document_number ?? 'N/A',
+            $payment->tipoPago->nombre ?? 'N/A',
+            $payment->reference ?? 'Sin referencia',
+            $payment->amount,
+            $this->statuses[$payment->status] ?? $payment->status,
+            $payment->creator->name ?? 'Sistema',
+            $payment->note ?? '',
+        ];
+    }
+}
+```
+
+## Performance Optimization
+
+### Cache Reference Data
+
+Load all reference data once in the constructor:
+
+```php
+public function __construct($query)
+{
+    $this->query = $query;
+    
+    // Cache all lookups to prevent N+1 queries
+    $this->clientsCache = Client::pluck('name', 'id')->toArray();
+    $this->warehousesCache = Warehouse::pluck('name', 'id')->toArray();
+    $this->usersCache = User::pluck('name', 'id')->toArray();
+    $this->statusLabels = Sale::getStatuses();
+    $this->paymentLabels = Sale::getPaymentTypes();
+}
+```
+
+### Eager Load Relationships
+
+```php
+public function query()
+{
+    return $this->query->with([
+        'client:id,name',
+        'user:id,name',
+        'warehouse:id,name'
+    ]);
+}
+```
+
+### Use Chunking for Large Datasets
+
+```php
+use Maatwebsite\Excel\Concerns\FromQuery;
+use Maatwebsite\Excel\Concerns\WithChunkReading;
+
+class SalesExport implements FromQuery, WithChunkReading
+{
+    public function chunkSize(): int
+    {
+        return 1000; // Process 1000 rows at a time
+    }
+}
+```
+
+### Queue Large Exports
+
+```php
+use Maatwebsite\Excel\Concerns\FromQuery;
+use Illuminate\Contracts\Queue\ShouldQueue;
+
+class SalesExport implements FromQuery, ShouldQueue
+{
+    // Export will be processed in background
+}
+```
+
+Controller usage:
+
+```php
+public function export(Request $request)
+{
+    $query = (new SaleFilters($request))->apply(Sale::query());
+    
+    // For large exports, queue and notify user
+    Excel::queue(new SalesExport($query), 'sales.xlsx');
+    
+    return back()->with('success', 'Export queued. You will be notified when ready.');
+}
+```
+
+## Styling Patterns
+
+### Professional Color Schemes
+
+```php
+// Indigo (Default)
+'startColor' => ['argb' => '4F46E5']
+
+// Emerald (Financial)
+'startColor' => ['argb' => '059669']
+
+// Amber (Warnings)
+'startColor' => ['argb' => 'F59E0B']
+
+// Red (Cancellations)
+'startColor' => ['argb' => 'DC2626']
+```
+
+### Number Formats
+
+```php
+// Currency
+$sheet->getStyle('G2:G' . $lastRow)
+    ->getNumberFormat()
+    ->setFormatCode('"$"#,##0.00');
+
+// Percentage
+$sheet->getStyle('H2:H' . $lastRow)
+    ->getNumberFormat()
+    ->setFormatCode('0.00%');
+
+// Integer
+$sheet->getStyle('E2:E' . $lastRow)
+    ->getNumberFormat()
+    ->setFormatCode('#,##0');
+
+// Date
+$sheet->getStyle('C2:C' . $lastRow)
+    ->getNumberFormat()
+    ->setFormatCode('dd/mm/yyyy');
+```
+
+### Conditional Formatting
+
+```php
+public function styles(Worksheet $sheet)
+{
+    $lastRow = $sheet->getHighestRow();
+    
+    // Highlight negative values in red
+    for ($row = 2; $row <= $lastRow; $row++) {
+        $value = $sheet->getCell('G' . $row)->getValue();
+        
+        if ($value < 0) {
+            $sheet->getStyle('G' . $row)->applyFromArray([
+                'font' => ['color' => ['argb' => 'DC2626']],
+            ]);
+        }
+    }
+    
+    return [];
+}
+```
+
+## Advanced Features
+
+### Multiple Sheets
+
+```php
+use Maatwebsite\Excel\Concerns\WithMultipleSheets;
+
+class FinancialReport implements WithMultipleSheets
+{
+    public function sheets(): array
+    {
+        return [
+            'Sales'      => new SalesExport($this->salesQuery),
+            'Payments'   => new PaymentsExport($this->paymentsQuery),
+            'Receivables' => new ReceivablesExport($this->receivablesQuery),
+        ];
+    }
+}
+```
+
+### Custom Headers and Footers
+
+```php
+use Maatwebsite\Excel\Concerns\WithEvents;
+use Maatwebsite\Excel\Events\AfterSheet;
+
+class SalesExport implements WithEvents
+{
+    public function registerEvents(): array
+    {
+        return [
+            AfterSheet::class => function(AfterSheet $event) {
+                // Add title row
+                $event->sheet->insertNewRowBefore(1);
+                $event->sheet->setCellValue('A1', 'Sales Report - ' . now()->format('F Y'));
+                $event->sheet->mergeCells('A1:F1');
+                $event->sheet->getStyle('A1')->applyFromArray([
+                    'font' => ['size' => 14, 'bold' => true],
+                    'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER],
+                ]);
+                
+                // Add totals row
+                $lastRow = $event->sheet->getHighestRow();
+                $event->sheet->setCellValue('F' . ($lastRow + 1), 'TOTAL:');
+                $event->sheet->setCellValue('G' . ($lastRow + 1), "=SUM(G2:G{$lastRow})");
+            },
+        ];
+    }
+}
+```
+
+### Auto-Filter
+
+```php
+public function registerEvents(): array
+{
+    return [
+        AfterSheet::class => function(AfterSheet $event) {
+            $event->sheet->setAutoFilter('A1:J1');
+        },
+    ];
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Cache Reference Data">
+    Always load catalogs (clients, products, statuses) in the constructor to avoid thousands of individual queries during mapping.
+  </Accordion>
+
+  <Accordion title="Use Eager Loading">
+    Load all relationships needed for export in the `query()` method:
+    ```php
+    return $this->query->with(['client', 'user', 'warehouse']);
+    ```
+  </Accordion>
+
+  <Accordion title="Format Numbers Properly">
+    Use Excel number formats instead of pre-formatting in PHP:
+    ```php
+    // Good: Let Excel format
+    return $sale->total_amount; // 1234.56
+    
+    // Bad: Pre-formatted string
+    return '$' . number_format($sale->total_amount, 2);
+    ```
+  </Accordion>
+
+  <Accordion title="Descriptive Filenames">
+    Include date/time in export filenames:
+    ```php
+    $fileName = 'ventas-' . now()->format('Y-m-d-His') . '.xlsx';
+    ```
+  </Accordion>
+
+  <Accordion title="Queue Large Exports">
+    For exports with >10,000 rows, implement `ShouldQueue` to prevent timeouts.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+### Memory Exhausted on Large Exports
+
+**Cause:** Loading too many records at once.
+
+**Solution:** Implement chunking:
+```php
+use Maatwebsite\Excel\Concerns\WithChunkReading;
+
+class SalesExport implements FromQuery, WithChunkReading
+{
+    public function chunkSize(): int
+    {
+        return 1000;
+    }
+}
+```
+
+### N+1 Query Problem (Slow Exports)
+
+**Cause:** Not eager loading relationships.
+
+**Solution:** Enable query log and check:
+```php
+DB::enableQueryLog();
+Excel::download(new SalesExport($query), 'test.xlsx');
+dd(DB::getQueryLog());
+```
+
+Add missing relationships to `query()` method.
+
+### Currency Format Not Applied
+
+**Cause:** Cell contains string instead of numeric value.
+
+**Solution:** Return raw numbers in `map()`:
+```php
+// Correct
+return [
+    $sale->total_amount, // numeric
+];
+
+// Incorrect
+return [
+    '$' . number_format($sale->total_amount, 2), // string
+];
+```
+
+### Export Timeout
+
+**Cause:** Processing too many records synchronously.
+
+**Solution:** Queue the export:
+```php
+class SalesExport implements FromQuery, ShouldQueue
+{
+    public $timeout = 300; // 5 minutes
+}
+```

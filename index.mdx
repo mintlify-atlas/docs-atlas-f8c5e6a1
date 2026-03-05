@@ -1,97 +1,140 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Welcome to Gestión de Ventas"
+description: "Complete sales management ERP system for tracking sales, inventory, accounting, clients, and generating tax-compliant invoices"
 ---
 
-## Setting up
-
-Get your documentation site up and running in minutes.
-
 <Card
-  title="Start here"
+  title="Get Started in Minutes"
   icon="rocket"
   href="/quickstart"
   horizontal
 >
-  Follow our three step quickstart guide.
+  Set up your complete sales management system and start tracking sales, inventory, and accounting.
 </Card>
 
-## Make it yours
+## Core Features
 
-Design a docs site that looks great and empowers your users.
+Powerful tools for managing your business operations end-to-end.
 
-<Columns cols={2}>
+<CardGroup cols={2}>
   <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
+    title="Sales Management"
+    icon="chart-line"
+    href="/modules/sales"
   >
-    Edit your docs locally and preview them in real time.
+    Track sales with support for cash and credit payments, NCF generation, and complete transaction history.
   </Card>
   <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
+    title="Inventory Control"
+    icon="boxes-stacked"
+    href="/modules/inventory"
   >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+    Real-time inventory tracking across multiple warehouses with automated stock adjustments.
   </Card>
   <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
+    title="Accounting System"
+    icon="calculator"
+    href="/modules/accounting"
   >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
-
-## Create beautiful pages
-
-Everything you need to create world-class documentation.
-
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+    Double-entry accounting with automated journal entries, receivables, and payment tracking.
   </Card>
   <Card
-    title="Code samples"
+    title="Client Management"
+    icon="users"
+    href="/modules/clients"
+  >
+    Comprehensive client profiles with equipment tracking, business types, and credit management.
+  </Card>
+  <Card
+    title="NCF Generation"
+    icon="file-invoice"
+    href="/features/ncf-generation"
+  >
+    Automatic generation of Dominican fiscal numbers (NCF) for tax compliance.
+  </Card>
+  <Card
+    title="Point of Sale"
+    icon="cash-register"
+    href="/features/point-of-sale"
+  >
+    Fast checkout process with multiple payment methods, cash handling, and instant invoice generation.
+  </Card>
+</CardGroup>
+
+## Architecture & Development
+
+Built with a clean, maintainable architecture designed for enterprise applications.
+
+<CardGroup cols={3}>
+  <Card
+    title="Service Layer"
+    icon="layer-group"
+    href="/concepts/service-layer"
+  >
+    Business logic in reusable services
+  </Card>
+  <Card
+    title="Filter Pipeline"
+    icon="filter"
+    href="/concepts/filters-pipeline"
+  >
+    Clean, composable data filtering
+  </Card>
+  <Card
+    title="Permissions"
+    icon="shield"
+    href="/concepts/permissions"
+  >
+    Role-based access control
+  </Card>
+</CardGroup>
+
+## Key Benefits
+
+<AccordionGroup>
+  <Accordion title="Tax Compliance">
+    Automatic NCF generation ensures compliance with Dominican tax regulations (DGII), including proper sequence management and cancellation tracking.
+  </Accordion>
+  <Accordion title="Real-Time Inventory">
+    Every sale automatically adjusts inventory levels with full audit trails. Support for multiple warehouses and product tracking.
+  </Accordion>
+  <Accordion title="Integrated Accounting">
+    Sales automatically generate journal entries, receivables, and payment records using double-entry accounting principles.
+  </Accordion>
+  <Accordion title="Export Everything">
+    Export sales, inventory movements, payments, and more to Excel with filtered data and custom columns.
+  </Accordion>
+</AccordionGroup>
+
+## Quick Links
+
+<CardGroup cols={2}>
+  <Card
+    title="Installation Guide"
+    icon="download"
+    href="/installation"
+  >
+    Install and configure the system
+  </Card>
+  <Card
+    title="API Reference"
     icon="code"
-    href="/essentials/code"
+    href="/api/models/sale"
   >
-    Add sample code to demonstrate how to use your product.
+    Explore models and services
   </Card>
   <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
+    title="Adding Modules"
+    icon="puzzle-piece"
+    href="/development/adding-modules"
   >
-    Display images and other media.
+    Extend the system with new features
   </Card>
   <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
+    title="Architecture Guide"
+    icon="building"
+    href="/concepts/architecture"
   >
-    Write once and reuse across your docs.
+    Understand the ERP pattern
   </Card>
-</Columns>
-
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+</CardGroup>

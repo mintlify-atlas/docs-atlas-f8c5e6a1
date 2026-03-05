@@ -1,80 +1,445 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart Guide
+description: Get up and running with Gestión de Ventas in minutes - from installation to your first sale
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
+Before you begin, make sure you've completed the [installation](/installation) and have:
 
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+- ✅ PHP 8.2+ installed
+- ✅ Composer and npm available
+- ✅ Database configured
+- ✅ Application server running
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  If you haven't installed the system yet, follow our [Installation Guide](/installation) first.
 </Note>
+
+## First Steps
+
+<Steps>
+  <Step title="Access the System">
+    Navigate to your application URL (e.g., `http://localhost:8000`) and log in with your credentials.
+
+    **Default Development Credentials:**
+    ```
+    Email: admin@example.com
+    Password: password
+    ```
+
+    <Warning>
+      Change default credentials immediately in production environments.
+    </Warning>
+  </Step>
+
+  <Step title="Configure Basic Settings">
+    Before creating sales, configure essential settings:
+
+    **1. Company Information**
+    - Navigate to **Settings** → **General Configuration**
+    - Set company name, RNC (tax ID), address
+    - Configure currency symbol and format
+
+    **2. Create a Warehouse**
+    - Go to **Inventory** → **Warehouses**
+    - Click **New Warehouse**
+    - Enter name (e.g., "Main Warehouse") and location
+    - Mark as active
+
+    **3. Add Product Categories**
+    - Navigate to **Products** → **Categories**
+    - Create categories for your products (e.g., "Electronics", "Office Supplies")
+
+    **4. Define Units of Measure**
+    - Go to **Configuration** → **Units**
+    - Common units: Unit (un), Box (box), Kilogram (kg)
+  </Step>
+
+  <Step title="Create Your First Product">
+    Add a product to sell:
+
+    - Go to **Products** → **Products List**
+    - Click **New Product**
+    - Fill in the details:
+
+    ```
+    Name: Sample Product
+    SKU: PROD-001
+    Category: Select from dropdown
+    Unit: Unit
+    Price: 99.99
+    Cost: 65.00
+    Is Active: Yes
+    Is Stockable: Yes
+    ```
+
+    - Click **Save**
+  </Step>
+
+  <Step title="Add Initial Stock">
+    If your product is stockable, add inventory:
+
+    - Go to **Inventory** → **Stock Movements**
+    - Click **New Movement**
+    - Select **Input** type
+    - Choose warehouse and product
+    - Enter quantity (e.g., 100 units)
+    - Enter unit cost
+    - Add description: "Initial stock"
+    - Click **Save**
+
+    The system automatically updates stock levels and creates accounting entries.
+  </Step>
+
+  <Step title="Create a Client">
+    Add your first customer:
+
+    - Navigate to **Clients** → **Clients List**
+    - Click **New Client**
+    - Fill in required information:
+
+    ```
+    Type: Individual or Company
+    Name: John Doe / ABC Company
+    Tax ID: Customer's RNC or Cédula
+    Email: client@example.com
+    Phone: (809) 555-1234
+    Credit Limit: 5000.00
+    Payment Terms: 30 days
+    ```
+
+    - Click **Save**
+  </Step>
+
+  <Step title="Make Your First Sale">
+    Create a sale at the point of sale:
+
+    - Go to **Sales** → **New Sale**
+    - Select **Client** from dropdown
+    - Select **Warehouse** where stock will be deducted
+    - Choose **Payment Type**:
+      - **Cash** - Immediate payment
+      - **Credit** - Creates receivable
+
+    **Add Products:**
+    - Click **Add Product**
+    - Select product from list
+    - Enter quantity
+    - Price auto-fills (editable if needed)
+    - Subtotal calculates automatically
+
+    **For Cash Sales:**
+    - Select payment method (Cash, Card, Transfer)
+    - Enter amount received
+    - System calculates change
+
+    **Complete Sale:**
+    - Review total amount
+    - Click **Complete Sale**
+
+    The system automatically:
+    - Deducts inventory
+    - Creates journal entry
+    - Generates invoice
+    - Creates receivable (if credit)
+    - Assigns NCF (if configured)
+  </Step>
+
+  <Step title="Print the Invoice">
+    After completing the sale:
+
+    - Click **Print Invoice** button
+    - Invoice opens in new tab with:
+      - Company information
+      - Customer details
+      - Itemized products
+      - Total amount
+      - NCF (if applicable)
+      - Payment details
+
+    Three print formats available:
+    - **Ticket (80mm)** - Thermal receipt printer
+    - **Letter** - Standard office printer
+    - **Route (58mm)** - Mobile printer
+  </Step>
+</Steps>
+
+## What Happened Behind the Scenes?
+
+When you completed the sale, the system automatically:
+
+### 1. Inventory Adjustment
+
+```php
+// Stock reduced for each product sold
+InventoryMovement::create([
+    'type' => 'output',
+    'warehouse_id' => 1,
+    'product_id' => 1,
+    'quantity' => 2,
+    'description' => 'Sale FAC-2024-001',
+]);
+```
+
+### 2. Accounting Entry (Cash Sale)
+
+```
+Debit:  Cash (1.1.01)           $199.98
+Credit: Sales Revenue (4.1)     $199.98
+```
+
+### 3. Accounting Entry (Credit Sale)
+
+```
+Debit:  Accounts Receivable (1.1.02)  $199.98
+Credit: Sales Revenue (4.1)           $199.98
+```
+
+### 4. Receivable Created (Credit Sales Only)
+
+```php
+Receivable::create([
+    'client_id' => 1,
+    'total_amount' => 199.98,
+    'due_date' => now()->addDays(30),
+    'status' => 'unpaid',
+]);
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="View Sales History" icon="list" href="/modules/sales">
+    Access all sales with filtering and export options
+  </Card>
+  
+  <Card title="Track Inventory" icon="warehouse" href="/modules/inventory">
+    Monitor stock levels and movements across warehouses
+  </Card>
+  
+  <Card title="Manage Receivables" icon="money-bill-trend-up" href="/features/receivables">
+    Track outstanding invoices and apply payments
+  </Card>
+  
+  <Card title="Accounting Reports" icon="chart-line" href="/modules/accounting">
+    View journal entries, trial balance, and financial reports
+  </Card>
+</CardGroup>
+
+## Common Tasks
+
+### Applying a Payment (Credit Sales)
+
+<Steps>
+  <Step title="Navigate to Receivables">
+    Go to **Accounting** → **Receivables**
+  </Step>
+  
+  <Step title="Find the Invoice">
+    Filter by client or invoice number
+  </Step>
+  
+  <Step title="Record Payment">
+    - Click **Add Payment**
+    - Enter payment amount
+    - Select payment method
+    - Add reference number (check/transfer)
+    - Click **Save**
+
+    System updates:
+    - Receivable balance
+    - Client balance
+    - Receivable status (Unpaid → Partial → Paid)
+    - Generates payment journal entry
+  </Step>
+</Steps>
+
+### Checking Stock Levels
+
+```php
+// View stock for a product
+Inventory → Stock Levels
+
+// Filter by:
+- Warehouse
+- Category
+- Low stock (below minimum)
+```
+
+### Canceling a Sale
+
+<Warning>
+  Sales can only be canceled if no payments have been applied to credit sales.
+</Warning>
+
+<Steps>
+  <Step title="Find the Sale">
+    Go to **Sales** → **Sales History**
+  </Step>
+  
+  <Step title="Cancel Sale">
+    - Click on the sale
+    - Click **Cancel Sale**
+    - Enter cancellation reason (required for NCF)
+    - Confirm
+
+    System automatically:
+    - Returns products to inventory
+    - Reverses accounting entries
+    - Cancels receivable (if unpaid)
+    - Voids NCF
+    - Cancels invoice
+  </Step>
+</Steps>
+
+## Understanding the Dashboard
+
+The main dashboard shows:
+
+<AccordionGroup>
+  <Accordion title="Sales Metrics">
+    - Today's sales count and total
+    - Monthly sales trend
+    - Top selling products
+    - Sales by payment type
+  </Accordion>
+  
+  <Accordion title="Inventory Alerts">
+    - Low stock products
+    - Out of stock items
+    - Recent movements
+    - Stock value by warehouse
+  </Accordion>
+  
+  <Accordion title="Receivables Summary">
+    - Total outstanding amount
+    - Overdue invoices
+    - Aging analysis (current, 30-60 days, 60+ days)
+    - Top debtors
+  </Accordion>
+  
+  <Accordion title="Recent Activity">
+    - Latest sales
+    - Recent payments
+    - Pending actions
+    - System notifications
+  </Accordion>
+</AccordionGroup>
+
+## Tips for Success
+
+<Tip>
+  **Set Minimum Stock Levels**
+  
+  Configure minimum stock thresholds for automatic low stock alerts:
+  
+  ```
+  Inventory → Stock → Edit Product
+  Set "Minimum Stock" field
+  ```
+</Tip>
+
+<Tip>
+  **Use Credit Limits Wisely**
+  
+  Start with conservative credit limits and increase based on payment history:
+  
+  ```php
+  New clients: $5,000
+  After 3 months good payment: $10,000
+  Established clients: $25,000+
+  ```
+</Tip>
+
+<Tip>
+  **Regular Backups**
+  
+  Schedule daily database backups:
+  
+  ```bash
+  php artisan backup:run
+  ```
+</Tip>
+
+<Tip>
+  **Export Data Regularly**
+  
+  Use Excel export features to create backups and analysis:
+  - Sales → Export
+  - Inventory → Export
+  - Receivables → Export
+  - Journal Entries → Export
+</Tip>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Sale creation fails with 'Insufficient stock'">
+    **Problem:** Product doesn't have enough stock in the selected warehouse.
+    
+    **Solution:**
+    1. Check stock levels: Inventory → Stock
+    2. Add stock if needed: Inventory → New Movement (Input)
+    3. Or select different warehouse with available stock
+  </Accordion>
+  
+  <Accordion title="Credit sale blocked: 'Insufficient credit'">
+    **Problem:** Sale would exceed client's credit limit.
+    
+    **Solution:**
+    1. Check client's current balance: Clients → View Client
+    2. Either:
+       - Increase credit limit if justified
+       - Request cash payment
+       - Apply pending payments to reduce balance
+  </Accordion>
+  
+  <Accordion title="Invoice doesn't generate">
+    **Problem:** Sale completed but no invoice created.
+    
+    **Solution:**
+    1. Check sale status is "completed"
+    2. Manually regenerate: Sales → View Sale → Print Invoice
+    3. Check logs: `storage/logs/laravel.log`
+  </Accordion>
+  
+  <Accordion title="Accounting entries not balanced">
+    **Problem:** Trial balance shows debits ≠ credits.
+    
+    **Solution:**
+    1. Check journal entries: Accounting → Journal Entries
+    2. Find unbalanced entries (Status: Draft)
+    3. Review and post or cancel
+    4. Contact support if automated entries are unbalanced
+  </Accordion>
+</AccordionGroup>
+
+## Need Help?
+
+<CardGroup cols={2}>
+  <Card title="Architecture Guide" icon="building" href="/concepts/architecture">
+    Understand how the system is structured
+  </Card>
+  
+  <Card title="Module Documentation" icon="book" href="/modules/sales">
+    Detailed guides for each module
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/models/sale">
+    Developer documentation for customization
+  </Card>
+  
+  <Card title="GitHub Repository" icon="github" href="https://github.com/Elian-D/gestion-ventas-laravel">
+    Source code and issue tracking
+  </Card>
+</CardGroup>
+
+## What's Next?
+
+Now that you've completed your first sale, explore these advanced features:
+
+1. **[NCF Generation](/features/ncf-generation)** - Configure Dominican fiscal numbers for tax compliance
+2. **[Journal Entries](/features/journal-entries)** - Understand automated double-entry accounting
+3. **[Export Functionality](/features/exports)** - Generate Excel reports with filters
+4. **[Adding Custom Modules](/development/adding-modules)** - Extend the system with new features

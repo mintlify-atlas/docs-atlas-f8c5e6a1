@@ -1,0 +1,404 @@
+---
+title: System Architecture
+description: Understanding the layered architecture pattern used in Gestión de Ventas Laravel ERP
+icon: 'sitemap'
+---
+
+## Overview
+
+Gestión de Ventas follows a **decoupled, service-based architecture** designed to achieve:
+
+- **Skinny Controllers**: Controllers act as orchestrators, not business logic containers
+- **High Reusability**: Business logic can be shared across controllers, jobs, and commands
+- **Testability**: Each layer can be unit tested independently
+- **Maintainability**: Clear separation of concerns makes code easier to understand and modify
+
+## Architectural Layers
+
+The system is organized into 6 distinct layers, each with specific responsibilities:
+
+<CardGroup cols={2}>
+  <Card title="Data Layer" icon="database" href="#1-data-layer-model">
+    Models manage persistence and relationships
+  </Card>
+  <Card title="UI Configuration" icon="table" href="#2-ui-configuration-layer-tables">
+    Tables centralize column definitions and visibility
+  </Card>
+  <Card title="Filtering" icon="filter" href="#3-filtering-layer-pipeline-pattern">
+    Pipeline pattern for clean, reusable filters
+  </Card>
+  <Card title="Validation" icon="shield-check" href="#4-validation-security-layer-form-requests">
+    Form Requests validate data and permissions
+  </Card>
+  <Card title="Business Logic" icon="gear" href="#5-business-logic-layer-services">
+    Services handle all business operations
+  </Card>
+  <Card title="Orchestration" icon="arrows-split-up-and-left" href="#6-orchestration-layer-controllers">
+    Controllers coordinate requests and responses
+  </Card>
+</CardGroup>
+
+---
+
+## 1. Data Layer (Model)
+
+**Location:** `app/Models/[Module].php`
+
+**Responsibility:** Manage database persistence, relationships, and query scopes.
+
+### Key Requirements
+
+<Note>
+  Every model must define a `scopeWithIndexRelations($query)` method to centralize eager loading used by both web tables and Excel exports.
+</Note>
+
+### Example: Sale Model
+
+```php app/Models/Sales/Sale.php
+class Sale extends Model
+{
+    use SoftDeletes;
+
+    protected $fillable = [
+        'document_type_id', 'number', 'client_id',
+        'warehouse_id', 'user_id', 'sale_date',
+        'total_amount', 'payment_type', 'status'
+    ];
+
+    protected $casts = [
+        'sale_date' => 'datetime',
+    ];
+
+    // Constants for status and payment types
+    const STATUS_COMPLETED = 'completed';
+    const STATUS_CANCELED  = 'canceled';
+    const PAYMENT_CASH     = 'cash';
+    const PAYMENT_CREDIT   = 'credit';
+
+    /**
+     * Centralizes relations for Index and Exports
+     * This prevents N+1 query problems
+     */
+    public function scopeWithIndexRelations($query)
+    {
+        return $query->with([
+            'client:id,name,tax_id',
+            'user:id,name',
+            'warehouse:id,name',
+            'tipoPago:id,nombre',
+            'items',
+            'items.product:id,name,sku'
+        ]);
+    }
+
+    // Relationships
+    public function client(): BelongsTo {
+        return $this->belongsTo(Client::class);
+    }
+
+    public function items(): HasMany {
+        return $this->hasMany(SaleItem::class);
+    }
+}
+```
+
+---
+
+## 2. UI Configuration Layer (Tables)
+
+**Location:** `app/Tables/[Module]Table.php`
+
+**Responsibility:** Centralize column names, labels, and visibility logic for different devices.
+
+### Methods Required
+
+- `allColumns()`: Returns all available columns with human-readable labels
+- `defaultDesktop()`: Columns visible by default on desktop devices
+- `defaultMobile()`: Critical columns for mobile devices
+
+### Example: SaleTable
+
+```php app/Tables/SalesTables/SaleTable.php
+class SaleTable
+{
+    /**
+     * All available columns for the sales module
+     */
+    public static function allColumns(): array
+    {
+        return [
+            'sale_date'    => 'Fecha',
+            'number'       => 'Folio / Número',
+            'client_id'    => 'Cliente',
+            'warehouse_id' => 'Almacén',
+            'payment_type' => 'Tipo de Pago',
+            'tipo_pago_id' => 'Método de Pago',
+            'total_amount' => 'Total',
+            'status'       => 'Estado',
+            'user_id'      => 'Vendedor',
+            'notes'        => 'Notas',
+        ];
+    }
+
+    /**
+     * Desktop default columns
+     */
+    public static function defaultDesktop(): array
+    {
+        return [
+            'sale_date',
+            'number',
+            'client_id',
+            'payment_type',
+            'total_amount',
+            'status',
+        ];
+    }
+
+    /**
+     * Mobile optimized columns
+     */
+    public static function defaultMobile(): array
+    {
+        return [
+            'client_id',
+            'total_amount',
+            'payment_type'
+        ];
+    }
+}
+```
+
+<Tip>
+  This approach allows users to customize which columns they want to see while providing sensible defaults.
+</Tip>
+
+---
+
+## 3. Filtering Layer (Pipeline Pattern)
+
+**Location:** `app/Filters/[Module]/`
+
+**Responsibility:** Keep controllers clean by moving all `where` clauses into dedicated filter classes.
+
+See [Filters & Pipeline Pattern](/concepts/filters-pipeline) for detailed documentation.
+
+---
+
+## 4. Validation & Security Layer (Form Requests)
+
+**Location:** `app/Http/Requests/[Module]/`
+
+**Responsibility:** Validate incoming data and verify permissions **before** the controller executes any logic.
+
+### Files
+
+- `Store[Module]Request.php` - For creating new records
+- `Update[Module]Request.php` - For updating existing records
+- `Bulk[Module]Request.php` - For bulk operations
+
+### Key Features
+
+<Steps>
+  <Step title="Authorization Check">
+    The `authorize()` method uses Spatie permissions to verify user access
+  </Step>
+  <Step title="Validation Rules">
+    The `rules()` method defines all validation constraints
+  </Step>
+  <Step title="Complex Validation">
+    The `withValidator()` method handles business rule validation (stock checks, credit limits, etc.)
+  </Step>
+</Steps>
+
+See [Permissions & Authorization](/concepts/permissions) for more details.
+
+---
+
+## 5. Business Logic Layer (Services)
+
+**Location:** `app/Services/[Module]/`
+
+**Responsibility:** Execute all business operations, database transactions, and complex calculations.
+
+<Warning>
+  Controllers should **never** call `Model::create()` or manage `DB::transaction()` directly. Always use services.
+</Warning>
+
+### Service Types
+
+<Tabs>
+  <Tab title="Business Service">
+    **File:** `[Module]Service.php`
+    
+    Handles write operations, complex calculations, and bulk actions.
+    
+    ```php
+    class SaleService
+    {
+        public function create(array $data): Sale
+        {
+            return DB::transaction(function () use ($data) {
+                // Create sale
+                // Register inventory movements
+                // Generate accounting entries
+                // Create receivables if needed
+                return $sale;
+            });
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Catalog Service">
+    **File:** `[Module]CatalogService.php`
+    
+    Provides data for dropdowns and selects, filtered by country or other global parameters.
+    
+    ```php
+    class SaleCatalogService
+    {
+        public function getForFilters(): array
+        {
+            return [
+                'clients' => Client::select('id', 'name')->get(),
+                'warehouses' => Warehouse::select('id', 'name')->get(),
+                'payment_types' => Sale::getPaymentTypes(),
+            ];
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+See [Service Layer](/concepts/service-layer) for detailed documentation.
+
+---
+
+## 6. Orchestration Layer (Controllers)
+
+**Location:** `app/Http/Controllers/[Module]/`
+
+**Responsibility:** Receive requests, call services, and return responses (views or JSON). Contains **zero business logic**.
+
+### Example: Standard Store Method
+
+```php app/Http/Controllers/Sales/SaleController.php
+class SaleController extends Controller
+{
+    public function __construct(
+        protected SaleService $service,
+        protected SaleCatalogService $catalogService
+    ) {}
+
+    /**
+     * Store a new sale
+     *
+     * The StoreSaleRequest handles:
+     * 1. Permission verification (authorize)
+     * 2. Data validation (rules)
+     * 3. Business rule validation (withValidator)
+     */
+    public function store(StoreSaleRequest $request)
+    {
+        try {
+            // Service handles all business logic
+            $sale = $this->service->create($request->validated());
+
+            return redirect()
+                ->route('sales.index')
+                ->with('success', "Venta #{$sale->number} registrada con éxito.");
+        } catch (Exception $e) {
+            return back()
+                ->withInput()
+                ->with('error', "Error: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Display the index page with filters
+     */
+    public function index(Request $request)
+    {
+        $sales = (new SaleFilters($request))
+            ->apply(Sale::query()->withIndexRelations())
+            ->latest()
+            ->paginate($request->input('per_page', 10));
+
+        return view('sales.index', [
+            'items' => $sales,
+            'visibleColumns' => $request->input('columns', SaleTable::defaultDesktop()),
+            'allColumns' => SaleTable::allColumns(),
+        ] + $this->catalogService->getForFilters());
+    }
+}
+```
+
+<Check>
+  Notice how the controller is clean and focused solely on orchestration - no business logic!
+</Check>
+
+---
+
+## Implementation Checklist
+
+When creating a new module, use this checklist to ensure consistency:
+
+<AccordionGroup>
+  <Accordion title="Database & Security">
+    - [ ] Create and run migration with `SoftDeletes`
+    - [ ] Create and run permissions seeder (`[Module]PermissionsSeeder`)
+    - [ ] Configure model with necessary scopes and relationships
+  </Accordion>
+
+  <Accordion title="Backend & Logic">
+    - [ ] Define `[Module]Table` class with column methods
+    - [ ] Create filter pipeline in `app/Filters/[Module]`
+    - [ ] Implement `CatalogService` (filter by country if applicable)
+    - [ ] Implement business `Service` with create, update, and bulk methods
+  </Accordion>
+
+  <Accordion title="HTTP & Routes">
+    - [ ] Create Form Requests (Store, Update, Bulk) with permission validation
+    - [ ] Register routes in `web.php` (index, create, store, edit, update, destroy, bulk, export)
+    - [ ] Configure controller with service injection
+  </Accordion>
+
+  <Accordion title="Frontend">
+    - [ ] Create index view with AJAX table and filter components
+    - [ ] Configure `window.filterSources` for filter chips
+    - [ ] Create Create/Edit forms populated by `CatalogService`
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Benefits of This Architecture
+
+<CardGroup cols={2}>
+  <Card title="Testability" icon="vial">
+    Each layer can be tested independently with mocks and stubs
+  </Card>
+  <Card title="Reusability" icon="recycle">
+    Services can be used from controllers, commands, jobs, and tests
+  </Card>
+  <Card title="Maintainability" icon="wrench">
+    Clear separation makes it easy to find and modify code
+  </Card>
+  <Card title="Scalability" icon="arrow-up-right-dots">
+    New features can be added without affecting existing code
+  </Card>
+</CardGroup>
+
+## Related Documentation
+
+<CardGroup cols={3}>
+  <Card title="Service Layer" icon="gear" href="/concepts/service-layer">
+    Deep dive into service architecture
+  </Card>
+  <Card title="Filters Pipeline" icon="filter" href="/concepts/filters-pipeline">
+    Learn about the filtering system
+  </Card>
+  <Card title="Permissions" icon="shield-check" href="/concepts/permissions">
+    Understand authorization flow
+  </Card>
+</CardGroup>

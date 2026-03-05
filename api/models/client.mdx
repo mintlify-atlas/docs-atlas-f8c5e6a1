@@ -1,0 +1,413 @@
+---
+title: 'Client'
+description: 'Model representing customers and their financial information'
+---
+
+## Overview
+
+The `Client` model represents customers in the ERP system. It manages customer information, credit limits, account balances, payment terms, and integrates with accounting and sales modules.
+
+**Namespace:** `App\Models\Clients\Client`
+
+**Database Table:** `clients`
+
+**Traits:** `HasFactory`, `SoftDeletes`
+
+## Properties
+
+### Fillable Attributes
+
+<ParamField path="type" type="string" required>
+  Client type: 'individual' or 'company'
+</ParamField>
+
+<ParamField path="estado_cliente_id" type="integer">
+  Foreign key to the client status configuration
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Legal name of the client
+</ParamField>
+
+<ParamField path="commercial_name" type="string">
+  Commercial or trade name (optional)
+</ParamField>
+
+<ParamField path="email" type="string">
+  Client's email address
+</ParamField>
+
+<ParamField path="phone" type="string">
+  Client's phone number
+</ParamField>
+
+<ParamField path="state_id" type="integer">
+  Foreign key to the State model for geographic location
+</ParamField>
+
+<ParamField path="city" type="string">
+  City name
+</ParamField>
+
+<ParamField path="address" type="text">
+  Full street address
+</ParamField>
+
+<ParamField path="tax_identifier_type_id" type="integer">
+  Foreign key to TaxIdentifierType (RNC, Cédula, etc.)
+</ParamField>
+
+<ParamField path="tax_id" type="string" required>
+  Tax identification number (RNC, Cédula, etc.)
+</ParamField>
+
+<ParamField path="credit_limit" type="decimal">
+  Maximum credit amount allowed for this client
+</ParamField>
+
+<ParamField path="balance" type="decimal">
+  Current outstanding balance
+</ParamField>
+
+<ParamField path="payment_terms" type="integer">
+  Number of days for payment terms (e.g., 30, 60, 90)
+</ParamField>
+
+<ParamField path="accounting_account_id" type="integer">
+  Foreign key to a specific AccountingAccount (optional)
+</ParamField>
+
+## Relationships
+
+### pos()
+
+Returns all points of sale associated with this client.
+
+<ResponseField name="pos" type="HasMany">
+  Returns a collection of `PointOfSale` models
+</ResponseField>
+
+```php
+$client->pos; // Collection of PointOfSale objects
+```
+
+### estadoCliente()
+
+Returns the client status configuration.
+
+<ResponseField name="estadoCliente" type="BelongsTo">
+  Returns an `EstadosCliente` model instance
+</ResponseField>
+
+```php
+$client->estadoCliente; // EstadosCliente object
+$client->estadoCliente->nombre; // Status name
+```
+
+### state()
+
+Returns the geographic state/province of the client.
+
+<ResponseField name="state" type="BelongsTo">
+  Returns a `State` model instance
+</ResponseField>
+
+```php
+$client->state; // State object
+$client->state->name; // State name
+```
+
+### taxIdentifierType()
+
+Returns the tax identifier type configuration.
+
+<ResponseField name="taxIdentifierType" type="BelongsTo">
+  Returns a `TaxIdentifierType` model instance
+</ResponseField>
+
+```php
+$client->taxIdentifierType; // TaxIdentifierType object
+$client->taxIdentifierType->code; // 'RNC', 'CED', etc.
+```
+
+### accountingAccount()
+
+Returns the specific accounting account for this client (if configured).
+
+<ResponseField name="accountingAccount" type="BelongsTo">
+  Returns an `AccountingAccount` model instance or null
+</ResponseField>
+
+```php
+$client->accountingAccount; // AccountingAccount object or null
+$client->accountingAccount->code; // Account code
+```
+
+### payments()
+
+Returns all payments made by this client.
+
+<ResponseField name="payments" type="HasMany">
+  Returns a collection of `Payment` models
+</ResponseField>
+
+```php
+$client->payments; // Collection of Payment objects
+```
+
+### sales()
+
+Returns all sales transactions for this client.
+
+<ResponseField name="sales" type="HasMany">
+  Returns a collection of `Sale` models
+</ResponseField>
+
+```php
+$client->sales; // Collection of Sale objects
+```
+
+### receivables()
+
+Returns all accounts receivable for this client.
+
+<ResponseField name="receivables" type="HasMany">
+  Returns a collection of `Receivable` models
+</ResponseField>
+
+```php
+$client->receivables; // Collection of Receivable objects
+```
+
+## Accessors
+
+### displayName
+
+Returns the commercial name if available, otherwise returns the legal name.
+
+```php
+$client->displayName; // Returns commercial_name or name
+```
+
+### taxLabel
+
+Returns the appropriate tax identifier label based on configuration.
+
+```php
+$client->taxLabel; // Returns 'RNC', 'CED', or 'ID Fiscal'
+```
+
+## Public Methods
+
+### refreshBalance()
+
+Recalculates the client's current balance based on unpaid and partially paid receivables.
+
+```php
+$client->refreshBalance();
+// Returns: bool (true if saved successfully)
+```
+
+**Implementation:**
+```php
+public function refreshBalance(): bool
+{
+    $this->balance = $this->receivables()
+        ->whereIn('status', [Receivable::STATUS_UNPAID, Receivable::STATUS_PARTIAL])
+        ->sum('current_balance');
+        
+    return $this->save();
+}
+```
+
+### hasCustomAccount()
+
+Determines if the client has a specific accounting account or uses the general accounts receivable account.
+
+```php
+$client->hasCustomAccount();
+// Returns: bool
+```
+
+**Implementation:**
+```php
+public function hasCustomAccount(): bool
+{
+    return !is_null($this->accounting_account_id);
+}
+```
+
+## Scopes
+
+### withIndexRelations()
+
+Eager loads all necessary relationships for index pages and list views.
+
+```php
+Client::withIndexRelations()->get();
+```
+
+This scope loads:
+- `estadoCliente` (id, nombre, clase_fondo, clase_texto)
+- `state` (id, name)
+- `taxIdentifierType` (id, name, code)
+- `accountingAccount` (id, code, name)
+
+## Usage Examples
+
+### Creating a Client
+
+```php
+use App\Models\Clients\Client;
+
+$client = Client::create([
+    'type' => 'company',
+    'name' => 'Empresa ABC, S.A.',
+    'commercial_name' => 'ABC Corp',
+    'email' => 'contacto@abc.com',
+    'phone' => '809-555-1234',
+    'tax_id' => '101234567',
+    'state_id' => 1,
+    'city' => 'Santo Domingo',
+    'address' => 'Calle Principal #123',
+    'credit_limit' => 50000.00,
+    'payment_terms' => 30
+]);
+```
+
+### Querying Clients
+
+```php
+// Get all clients with relationships
+$clients = Client::withIndexRelations()
+    ->orderBy('name')
+    ->get();
+
+// Access client data
+foreach ($clients as $client) {
+    echo $client->displayName;
+    echo $client->taxLabel . ': ' . $client->tax_id;
+    echo $client->estadoCliente->nombre;
+}
+```
+
+### Managing Credit and Balance
+
+```php
+// Check if client has available credit
+$availableCredit = $client->credit_limit - $client->balance;
+
+if ($availableCredit >= $saleAmount) {
+    // Process sale
+} else {
+    // Reject or require payment
+}
+
+// Refresh balance after payments
+$client->refreshBalance();
+```
+
+### Working with Client Sales
+
+```php
+// Get all sales for a client
+$totalSales = $client->sales()
+    ->where('status', 'completed')
+    ->sum('total_amount');
+
+// Get sales from this month
+$monthlySales = $client->sales()
+    ->whereMonth('sale_date', now()->month)
+    ->with('items.product')
+    ->get();
+```
+
+### Managing Receivables
+
+```php
+// Get unpaid receivables
+$unpaidReceivables = $client->receivables()
+    ->whereIn('status', ['unpaid', 'partial'])
+    ->get();
+
+// Calculate total debt
+$totalDebt = $unpaidReceivables->sum('current_balance');
+
+// Get overdue invoices
+$overdueInvoices = $client->receivables()
+    ->where('status', 'unpaid')
+    ->where('due_date', '<', now())
+    ->get();
+```
+
+### Client Payment History
+
+```php
+// Get all payments
+$payments = $client->payments()
+    ->with('receivable')
+    ->orderBy('payment_date', 'desc')
+    ->get();
+
+// Calculate total payments this year
+$yearlyPayments = $client->payments()
+    ->whereYear('payment_date', now()->year)
+    ->sum('amount');
+```
+
+### Custom Accounting Integration
+
+```php
+// Check if client uses custom account
+if ($client->hasCustomAccount()) {
+    $account = $client->accountingAccount;
+    echo "Account: {$account->code} - {$account->name}";
+} else {
+    echo "Uses general accounts receivable account";
+}
+```
+
+### Filtering Clients
+
+```php
+// Get clients by type
+$companies = Client::where('type', 'company')->get();
+$individuals = Client::where('type', 'individual')->get();
+
+// Get clients with outstanding balance
+$clientsWithDebt = Client::where('balance', '>', 0)
+    ->orderBy('balance', 'desc')
+    ->get();
+
+// Get clients by credit limit
+$premiumClients = Client::where('credit_limit', '>=', 100000)
+    ->get();
+```
+
+### Client Risk Analysis
+
+```php
+// Calculate credit utilization
+$utilizationRate = ($client->balance / $client->credit_limit) * 100;
+
+if ($utilizationRate > 80) {
+    // High risk - approaching credit limit
+} elseif ($utilizationRate > 50) {
+    // Medium risk
+} else {
+    // Low risk
+}
+
+// Days since last payment
+$lastPayment = $client->payments()->latest('payment_date')->first();
+if ($lastPayment) {
+    $daysSincePayment = now()->diffInDays($lastPayment->payment_date);
+}
+```
+
+## Related Models
+
+- [Sale](/api/models/sale) - Sales transactions
+- [Payment](/api/models/payment) - Payment records
+- [Receivable](/api/models/receivable) - Accounts receivable
+- [PointOfSale](/api/models/point-of-sale) - Client locations

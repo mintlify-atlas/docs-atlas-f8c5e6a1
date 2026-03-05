@@ -1,0 +1,348 @@
+---
+title: 'Sale'
+description: 'Model representing sales transactions in the ERP system'
+---
+
+## Overview
+
+The `Sale` model represents a sales transaction in the system. It handles both cash and credit sales, tracks payment information, manages sale items, and integrates with invoicing and NCF (tax document numbering) systems.
+
+**Namespace:** `App\Models\Sales\Sale`
+
+**Database Table:** `sales`
+
+**Traits:** `SoftDeletes`
+
+## Properties
+
+### Fillable Attributes
+
+<ParamField path="document_type_id" type="integer">
+  ID of the document type associated with the sale
+</ParamField>
+
+<ParamField path="number" type="string">
+  Sale number/identifier for tracking
+</ParamField>
+
+<ParamField path="client_id" type="integer" required>
+  Foreign key to the Client model
+</ParamField>
+
+<ParamField path="warehouse_id" type="integer" required>
+  Foreign key to the Warehouse model where the sale originated
+</ParamField>
+
+<ParamField path="user_id" type="integer" required>
+  Foreign key to the User who created the sale
+</ParamField>
+
+<ParamField path="sale_date" type="datetime" required>
+  Date and time when the sale was made
+</ParamField>
+
+<ParamField path="total_amount" type="decimal" required>
+  Total amount of the sale in the system currency
+</ParamField>
+
+<ParamField path="payment_type" type="string" required>
+  Type of payment: 'cash' or 'credit'
+</ParamField>
+
+<ParamField path="tipo_pago_id" type="integer">
+  Foreign key to the TipoPago (payment type configuration) model
+</ParamField>
+
+<ParamField path="cash_received" type="decimal">
+  Amount of cash received from customer (for cash payments)
+</ParamField>
+
+<ParamField path="cash_change" type="decimal">
+  Change returned to customer (for cash payments)
+</ParamField>
+
+<ParamField path="status" type="string" required>
+  Current status: 'completed' or 'canceled'
+</ParamField>
+
+<ParamField path="notes" type="text">
+  Additional notes or comments about the sale
+</ParamField>
+
+## Constants
+
+### Status Constants
+
+```php
+const STATUS_COMPLETED = 'completed';
+const STATUS_CANCELED  = 'canceled';
+```
+
+### Payment Type Constants
+
+```php
+const PAYMENT_CASH   = 'cash';
+const PAYMENT_CREDIT = 'credit';
+```
+
+## Relationships
+
+### items()
+
+Returns all line items of the sale.
+
+<ResponseField name="items" type="HasMany">
+  Returns a collection of `SaleItem` models
+</ResponseField>
+
+```php
+$sale->items; // Collection of SaleItem objects
+```
+
+### client()
+
+Returns the client associated with the sale.
+
+<ResponseField name="client" type="BelongsTo">
+  Returns a `Client` model instance
+</ResponseField>
+
+```php
+$sale->client; // Client object
+$sale->client->name; // Client name
+```
+
+### user()
+
+Returns the user who created the sale.
+
+<ResponseField name="user" type="BelongsTo">
+  Returns a `User` model instance
+</ResponseField>
+
+```php
+$sale->user; // User object
+$sale->user->name; // User name
+```
+
+### warehouse()
+
+Returns the warehouse where the sale originated.
+
+<ResponseField name="warehouse" type="BelongsTo">
+  Returns a `Warehouse` model instance
+</ResponseField>
+
+```php
+$sale->warehouse; // Warehouse object
+$sale->warehouse->name; // Warehouse name
+```
+
+### tipoPago()
+
+Returns the payment type configuration.
+
+<ResponseField name="tipoPago" type="BelongsTo">
+  Returns a `TipoPago` model instance
+</ResponseField>
+
+```php
+$sale->tipoPago; // TipoPago object
+$sale->tipoPago->nombre; // Payment type name
+```
+
+### invoice()
+
+Returns the invoice associated with the sale (if exists).
+
+<ResponseField name="invoice" type="HasOne">
+  Returns an `Invoice` model instance or null
+</ResponseField>
+
+```php
+$sale->invoice; // Invoice object or null
+```
+
+### ncfLog()
+
+Returns the NCF (tax document number) log for the sale.
+
+<ResponseField name="ncfLog" type="HasOne">
+  Returns an `NcfLog` model instance or null
+</ResponseField>
+
+```php
+$sale->ncfLog; // NcfLog object or null
+$sale->ncfLog->full_ncf; // Full NCF number
+```
+
+## Accessors
+
+### ncf
+
+Convenience accessor to get the full NCF number directly.
+
+```php
+$sale->ncf; // Returns $sale->ncfLog?->full_ncf
+```
+
+## Scopes
+
+### withIndexRelations()
+
+Eager loads all necessary relationships for index pages and exports.
+
+```php
+Sale::withIndexRelations()->get();
+```
+
+This scope loads:
+- `client` (id, name, tax_id)
+- `user` (id, name)
+- `warehouse` (id, name)
+- `tipoPago` (id, nombre)
+- `items` (all fields)
+- `items.product` (id, name, sku)
+
+## Static Methods
+
+### getStatuses()
+
+Returns an array of available statuses with their labels.
+
+```php
+Sale::getStatuses();
+// Returns:
+// [
+//   'completed' => 'Completada',
+//   'canceled' => 'Anulada'
+// ]
+```
+
+### getPaymentTypes()
+
+Returns an array of available payment types with their labels.
+
+```php
+Sale::getPaymentTypes();
+// Returns:
+// [
+//   'cash' => 'Contado',
+//   'credit' => 'Crédito'
+// ]
+```
+
+### getStatusStyles()
+
+Returns Tailwind CSS classes for status badges.
+
+```php
+Sale::getStatusStyles();
+// Returns:
+// [
+//   'completed' => 'bg-emerald-100 text-emerald-700 border-emerald-200 ring-emerald-500/10',
+//   'canceled' => 'bg-red-100 text-red-700 border-red-200 ring-red-500/10'
+// ]
+```
+
+### getPaymentTypeStyles()
+
+Returns Tailwind CSS classes for payment type badges.
+
+```php
+Sale::getPaymentTypeStyles();
+// Returns:
+// [
+//   'cash' => 'bg-blue-100 text-blue-700 border-blue-200 ring-blue-500/10',
+//   'credit' => 'bg-amber-100 text-amber-700 border-amber-200 ring-amber-500/10'
+// ]
+```
+
+### getPaymentTypeIcons()
+
+Returns Heroicon class names for payment type icons.
+
+```php
+Sale::getPaymentTypeIcons();
+// Returns:
+// [
+//   'cash' => 'heroicon-s-banknotes',
+//   'credit' => 'heroicon-s-credit-card'
+// ]
+```
+
+## Usage Examples
+
+### Creating a Sale
+
+```php
+use App\Models\Sales\Sale;
+
+$sale = Sale::create([
+    'client_id' => 1,
+    'warehouse_id' => 1,
+    'user_id' => auth()->id(),
+    'sale_date' => now(),
+    'total_amount' => 1500.00,
+    'payment_type' => Sale::PAYMENT_CASH,
+    'cash_received' => 2000.00,
+    'cash_change' => 500.00,
+    'status' => Sale::STATUS_COMPLETED,
+    'notes' => 'Regular sale'
+]);
+```
+
+### Querying Sales with Relationships
+
+```php
+// Get all completed sales with relationships
+$sales = Sale::withIndexRelations()
+    ->where('status', Sale::STATUS_COMPLETED)
+    ->orderBy('sale_date', 'desc')
+    ->get();
+
+foreach ($sales as $sale) {
+    echo $sale->client->name;
+    echo $sale->total_amount;
+    echo $sale->ncf; // Access NCF directly
+    
+    foreach ($sale->items as $item) {
+        echo $item->product->name;
+        echo $item->quantity;
+    }
+}
+```
+
+### Filtering by Payment Type
+
+```php
+// Get all credit sales
+$creditSales = Sale::where('payment_type', Sale::PAYMENT_CREDIT)
+    ->with('client')
+    ->get();
+
+// Get cash sales from today
+$todayCashSales = Sale::where('payment_type', Sale::PAYMENT_CASH)
+    ->whereDate('sale_date', today())
+    ->sum('total_amount');
+```
+
+### Working with Sale Status
+
+```php
+// Get status label
+$statuses = Sale::getStatuses();
+$statusLabel = $statuses[$sale->status]; // 'Completada' or 'Anulada'
+
+// Get CSS classes for badge
+$styles = Sale::getStatusStyles();
+$badgeClass = $styles[$sale->status];
+```
+
+## Related Models
+
+- [SaleItem](/api/models/sale-item) - Line items of the sale
+- [Client](/api/models/client) - Customer information
+- [Invoice](/api/models/invoice) - Invoice generation
+- [Product](/api/models/product) - Products sold
+- [Warehouse](/api/models/warehouse) - Warehouse management

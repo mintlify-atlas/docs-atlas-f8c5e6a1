@@ -1,0 +1,384 @@
+---
+title: NCF Generation
+description: Automatic generation and management of NCF (Número de Comprobante Fiscal) for Dominican Republic tax compliance
+icon: 'file-invoice'
+---
+
+## Overview
+
+The NCF Generation system provides automated management of tax document numbers required by the Dominican Republic's DGII (Dirección General de Impuestos Internos). The system handles both physical and electronic NCF formats with full sequence management and audit trails.
+
+<Info>
+  NCF generation is automatically integrated with the Point of Sale system and invoice generation.
+</Info>
+
+## Architecture
+
+The NCF system is built on a contract-based architecture using dependency injection:
+
+```php
+interface NcfGeneratorInterface
+{
+    public function generate(Sale $sale, int $ncfTypeId): string;
+    public function hasAvailability(int $ncfTypeId): bool;
+}
+```
+
+The `LocalNcfGenerator` implementation is automatically injected into `SaleService` and handles all NCF generation logic.
+
+## Core Components
+
+### NCF Types
+
+The system supports multiple NCF types as defined by DGII regulations:
+
+```php
+class NcfType extends Model
+{
+    protected $fillable = [
+        'name',           // e.g., "Factura de Crédito Fiscal"
+        'prefix',         // e.g., "B" or "E"
+        'code',           // e.g., "01", "02", "31"
+        'is_electronic',  // Boolean: e-NCF vs physical
+        'requires_rnc',   // Boolean: requires client tax ID
+        'is_active'
+    ];
+}
+```
+
+**Common NCF Types:**
+- **B01**: Crédito Fiscal (Tax Credit Invoice)
+- **B02**: Consumidor Final (Consumer Invoice)
+- **B14**: Nota de Crédito (Credit Note)
+- **B15**: Nota de Débito (Debit Note)
+- **E31**: Factura Electrónica (e-NCF)
+
+### NCF Sequences
+
+Sequences are authorized ranges of NCF numbers loaded from DGII:
+
+```php
+class NcfSequence extends Model
+{
+    const STATUS_ACTIVE    = 'active';
+    const STATUS_EXHAUSTED = 'exhausted';
+    const STATUS_EXPIRED   = 'expired';
+
+    protected $fillable = [
+        'ncf_type_id',
+        'series',          // e.g., "B01" or "E31001"
+        'from',            // Starting sequence number
+        'to',              // Ending sequence number
+        'current',         // Current counter
+        'expiry_date',     // DGII authorization expiry
+        'alert_threshold', // Low stock warning
+        'status'
+    ];
+
+    public function isLow(): bool
+    {
+        $remaining = $this->to - $this->current;
+        return $remaining <= $this->alert_threshold;
+    }
+}
+```
+
+<Warning>
+  Sequences have expiration dates set by DGII. The system automatically marks expired sequences as `STATUS_EXPIRED`.
+</Warning>
+
+### NCF Log (Audit Trail)
+
+Every generated NCF is logged for DGII compliance:
+
+```php
+class NcfLog extends Model
+{
+    const STATUS_USED   = 'used';
+    const STATUS_VOIDED = 'voided';
+
+    protected $fillable = [
+        'full_ncf',            // Complete NCF: "B0100000123"
+        'sale_id',             // Associated sale
+        'ncf_type_id',
+        'ncf_sequence_id',
+        'status',
+        'cancellation_reason', // Required for 608 report
+        'user_id'
+    ];
+}
+```
+
+## NCF Generation Process
+
+### Step 1: Request NCF During Sale
+
+When creating a sale through the POS, optionally specify an NCF type:
+
+```php
+public function create(array $data): Sale
+{
+    return DB::transaction(function () use ($data) {
+        // ... create sale ...
+
+        if (isset($data['ncf_type_id'])) {
+            $fullNcf = $this->ncfGenerator->generate($sale, $data['ncf_type_id']);
+            $sale->update(['ncf' => $fullNcf]);
+        }
+
+        // ... continue processing ...
+    });
+}
+```
+
+### Step 2: Generate Sequential Number
+
+The generator finds an active sequence and atomically increments the counter:
+
+```php
+public function generate(Sale $sale, int $ncfTypeId): string
+{
+    return DB::transaction(function () use ($sale, $ncfTypeId) {
+        // 1. Lock the active sequence (prevents race conditions)
+        $sequence = NcfSequence::where('ncf_type_id', $ncfTypeId)
+            ->where('status', NcfSequence::STATUS_ACTIVE)
+            ->where('expiry_date', '>=', now())
+            ->lockForUpdate()
+            ->first();
+
+        if (!$sequence) {
+            throw new Exception("No active sequences available.");
+        }
+
+        // 2. Increment counter
+        $nextNumber = $sequence->current + 1;
+
+        if ($nextNumber > $sequence->to) {
+            $sequence->update(['status' => NcfSequence::STATUS_EXHAUSTED]);
+            throw new Exception("Sequence exhausted.");
+        }
+
+        // 3. Determine padding (8 digits for physical, 10 for e-NCF)
+        $padding = $sequence->type->is_electronic ? 10 : 8;
+
+        // 4. Format complete NCF
+        // Structure: Series + Type Code + Padded Number
+        // Example: "B01" + "00000123" = "B0100000123"
+        $fullNcf = $sequence->series . 
+                   str_pad($sequence->type->code, 2, '0', STR_PAD_LEFT) . 
+                   str_pad($nextNumber, $padding, '0', STR_PAD_LEFT);
+
+        // 5. Update sequence
+        $sequence->update(['current' => $nextNumber]);
+
+        // 6. Create audit log
+        NcfLog::create([
+            'full_ncf' => $fullNcf,
+            'sale_id' => $sale->id,
+            'ncf_type_id' => $ncfTypeId,
+            'ncf_sequence_id' => $sequence->id,
+            'status' => NcfLog::STATUS_USED,
+            'user_id' => Auth::id() ?? $sale->user_id,
+        ]);
+
+        return $fullNcf;
+    });
+}
+```
+
+<Steps>
+  <Step title="Acquire Lock">
+    Uses `lockForUpdate()` to prevent concurrent transactions from generating duplicate NCFs
+  </Step>
+  <Step title="Validate Availability">
+    Checks sequence status, expiration date, and remaining numbers
+  </Step>
+  <Step title="Format NCF">
+    Combines series, type code, and padded sequence number
+  </Step>
+  <Step title="Update & Log">
+    Atomically increments counter and creates audit trail
+  </Step>
+</Steps>
+
+## NCF Cancellation
+
+When a sale is voided, the associated NCF must be marked as cancelled:
+
+```php
+public function cancel(Sale $sale, ?string $reason = null): bool
+{
+    return DB::transaction(function () use ($sale, $reason) {
+        // ... other cancellation logic ...
+
+        // Update NCF log with cancellation reason
+        NcfLog::where('sale_id', $sale->id)
+            ->update([
+                'status' => NcfLog::STATUS_VOIDED,
+                'cancellation_reason' => $reason ?? 'Manual sale cancellation'
+            ]);
+
+        // ... continue ...
+    });
+}
+```
+
+<Warning>
+  A cancellation reason is **required** for the DGII 608 report (Comprobantes Anulados).
+</Warning>
+
+## Sequence Management
+
+### Loading New Sequences
+
+When you receive new NCF authorization from DGII:
+
+```php
+NcfSequence::create([
+    'ncf_type_id' => 1,              // B01 - Crédito Fiscal
+    'series' => 'B01',
+    'from' => 1,
+    'to' => 10000,                   // 10,000 authorized NCFs
+    'current' => 0,
+    'expiry_date' => '2026-12-31',   // DGII expiration date
+    'alert_threshold' => 500,        // Warn when 500 remaining
+    'status' => NcfSequence::STATUS_ACTIVE
+]);
+```
+
+### Monitoring Availability
+
+```php
+public function hasAvailability(int $ncfTypeId): bool
+{
+    return NcfSequence::where('ncf_type_id', $ncfTypeId)
+        ->where('status', NcfSequence::STATUS_ACTIVE)
+        ->where('expiry_date', '>=', now())
+        ->whereColumn('current', '<', 'to')
+        ->exists();
+}
+```
+
+### Low Stock Alerts
+
+The system automatically checks if sequences are running low:
+
+```php
+$lowSequences = NcfSequence::where('status', NcfSequence::STATUS_ACTIVE)
+    ->get()
+    ->filter(function ($sequence) {
+        return $sequence->isLow();
+    });
+
+foreach ($lowSequences as $sequence) {
+    $remaining = $sequence->to - $sequence->current;
+    // Alert: "Sequence {$sequence->series} has only {$remaining} NCFs remaining"
+}
+```
+
+## DGII Compliance Reports
+
+### 607 Report (Sales)
+
+Export all used NCFs for tax reporting:
+
+```php
+class NcfLogsExport implements FromQuery, WithHeadings, WithMapping
+{
+    public function map($log): array
+    {
+        return [
+            $log->created_at->format('d/m/Y'),
+            $log->full_ncf,
+            $log->type->name,
+            $log->sale->number,
+            $log->sale->client->tax_id ?? 'N/A',
+            $log->sale->client->name,
+            $log->sale->total_amount,
+            $log->sale->total_amount * 0.18, // ITBIS calculation
+            $log->status == 'used' ? 'Utilizado' : 'Anulado'
+        ];
+    }
+}
+```
+
+### 608 Report (Cancellations)
+
+Export all voided NCFs with reasons:
+
+```php
+$voidedNcfs = NcfLog::where('status', NcfLog::STATUS_VOIDED)
+    ->whereBetween('created_at', [$startDate, $endDate])
+    ->with(['sale.client', 'type'])
+    ->get();
+```
+
+## Usage in POS
+
+The POS form allows NCF type selection:
+
+```html
+<select name="ncf_type_id">
+    <option value="">Sin NCF</option>
+    @foreach($ncfTypes as $type)
+        <option value="{{ $type->id }}" 
+                @if(!$ncfGenerator->hasAvailability($type->id)) disabled @endif>
+            {{ $type->display_name }}
+            @if(!$ncfGenerator->hasAvailability($type->id))
+                (Agotado)
+            @endif
+        </option>
+    @endforeach
+</select>
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Transaction Safety">
+    Always use database transactions when generating NCFs to prevent duplicate numbers or orphaned sequences.
+  </Accordion>
+
+  <Accordion title="Sequence Monitoring">
+    Set appropriate `alert_threshold` values (typically 10-20% of total capacity) to request new sequences before exhaustion.
+  </Accordion>
+
+  <Accordion title="RNC Validation">
+    For NCF types with `requires_rnc = true`, validate that the client has a valid tax ID before allowing the transaction.
+  </Accordion>
+
+  <Accordion title="Cancellation Documentation">
+    Always require and store detailed cancellation reasons for audit compliance. Generic reasons may be rejected by DGII.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+### "No active sequences available"
+
+**Cause:** All sequences are exhausted, expired, or inactive.
+
+**Solution:** 
+1. Check sequence status: `NcfSequence::where('ncf_type_id', $id)->latest()->first()`
+2. Load new sequences from DGII authorization
+3. Verify expiration dates
+
+### Duplicate NCF Generated
+
+**Cause:** Transaction not properly isolated or lock not acquired.
+
+**Solution:**
+- Verify `lockForUpdate()` is used
+- Check database transaction isolation level
+- Ensure no direct SQL queries bypass the service layer
+
+### Sequence Marked Exhausted Prematurely
+
+**Cause:** `current` value doesn't match actual usage.
+
+**Solution:**
+```php
+$sequence = NcfSequence::find($id);
+$actualUsed = NcfLog::where('ncf_sequence_id', $id)->count();
+$sequence->update(['current' => $actualUsed]);
+```

@@ -1,0 +1,571 @@
+---
+title: "Invoicing Module"
+description: "Automatic invoice generation and printing with support for multiple formats and tax compliance"
+---
+
+## Overview
+
+The Invoicing module automatically generates invoices from completed sales with support for multiple print formats. It integrates with the NCF system for tax compliance and provides flexible printing options for different business scenarios.
+
+<CardGroup cols={3}>
+  <Card title="Auto-Generate" icon="wand-magic-sparkles">
+    Invoices created from sales
+  </Card>
+  <Card title="Multiple Formats" icon="print">
+    Ticket, letter, and route formats
+  </Card>
+  <Card title="Tax Compliant" icon="file-invoice">
+    NCF integration for DGII
+  </Card>
+</CardGroup>
+
+## Invoice Structure
+
+### Core Fields
+
+```php app/Models/Sales/Invoice.php
+protected $fillable = [
+    'sale_id',
+    'invoice_number',
+    'type',              // Not actively used
+    'format_type',       // ticket, letter, route
+    'status',            // active, cancelled
+    'due_date',          // For credit sales
+    'generated_by',      // User who generated
+];
+
+protected $casts = [
+    'due_date' => 'date',
+    'created_at' => 'datetime',
+];
+```
+
+### Invoice Status
+
+```php
+const STATUS_ACTIVE = 'active';
+const STATUS_CANCELLED = 'cancelled';
+
+public static function getStatuses(): array
+{
+    return [
+        self::STATUS_ACTIVE    => 'Vigente',
+        self::STATUS_CANCELLED => 'Anulada',
+    ];
+}
+```
+
+**Status Flow:**
+
+```mermaid
+graph LR
+    A[Active] --> B[Cancelled]
+```
+
+## Print Formats
+
+The system supports three print formats for different use cases:
+
+<Tabs>
+  <Tab title="Ticket (80mm)">
+    **For:** Point of sale, retail stores
+
+    **Features:**
+    - Thermal printer compatible
+    - 80mm paper width
+    - Compact format
+    - Fast printing
+    - Essential information only
+
+    ```php
+    const FORMAT_TICKET = 'ticket';
+    ```
+
+    **Layout:**
+    ```
+    ┌──────────────────────┐
+    │   COMPANY LOGO       │
+    │   Company Name       │
+    │   RNC: ###-###-###   │
+    ├──────────────────────┤
+    │ FAC-2024-001        │
+    │ NCF: B0100000001    │
+    │ Date: 2024-03-05    │
+    ├──────────────────────┤
+    │ Product        Qty  │
+    │ Price      Subtotal │
+    ├──────────────────────┤
+    │ Item 1         2    │
+    │ $10.00      $20.00  │
+    ├──────────────────────┤
+    │ TOTAL:       $20.00 │
+    │ Payment: Cash      │
+    │ Received:    $25.00 │
+    │ Change:       $5.00 │
+    └──────────────────────┘
+    ```
+  </Tab>
+  <Tab title="Letter (Office)">
+    **For:** Credit sales, B2B, formal documentation
+
+    **Features:**
+    - Standard letter size (8.5" x 11")
+    - Professional layout
+    - Detailed information
+    - Company branding
+    - Terms and conditions
+    - Signature lines
+
+    ```php
+    const FORMAT_LETTER = 'letter';
+    ```
+
+    **Use Cases:**
+    - Credit sales with payment terms
+    - Corporate clients
+    - Government contracts
+    - Legal documentation
+    - Accounting records
+  </Tab>
+  <Tab title="Route (58mm)">
+    **For:** Mobile sales, delivery trucks, route sales
+
+    **Features:**
+    - Extra compact (58mm)
+    - Mobile printer compatible
+    - Battery-powered printing
+    - Minimal information
+    - Fast on-site printing
+
+    ```php
+    const FORMAT_ROUTE = 'route';
+    ```
+
+    **Use Cases:**
+    - Delivery receipts
+    - Route sales (beverage distribution)
+    - Field service
+    - Mobile POS
+  </Tab>
+</Tabs>
+
+## Invoice Generation
+
+### Automatic Generation
+
+Invoices are automatically created when a sale is completed:
+
+```php app/Services/Sales/SalesServices/SaleService.php
+public function create(array $data): Sale
+{
+    return DB::transaction(function () use ($data) {
+        // Create sale
+        $sale = Sale::create([...]);
+
+        // Add items
+        foreach ($data['items'] as $item) {
+            $sale->items()->create([...]);
+        }
+
+        // Generate invoice
+        $this->invoiceService->createFromSale($sale);
+
+        return $sale;
+    });
+}
+```
+
+### Invoice Service
+
+```php app/Services/Sales/InvoicesServices/InvoiceService.php
+public function createFromSale(Sale $sale): Invoice
+{
+    // Determine format based on payment type or client type
+    $format = $this->determineFormat($sale);
+
+    // Calculate due date for credit sales
+    $dueDate = null;
+    if ($sale->payment_type === Sale::PAYMENT_CREDIT) {
+        $dueDate = $sale->sale_date->copy()
+            ->addDays($sale->client->payment_terms ?? 30);
+    }
+
+    // Create invoice
+    return Invoice::create([
+        'sale_id' => $sale->id,
+        'invoice_number' => $sale->number,
+        'format_type' => $format,
+        'status' => Invoice::STATUS_ACTIVE,
+        'due_date' => $dueDate,
+        'generated_by' => auth()->id(),
+    ]);
+}
+
+protected function determineFormat(Sale $sale): string
+{
+    // Letter format for credit sales
+    if ($sale->payment_type === Sale::PAYMENT_CREDIT) {
+        return Invoice::FORMAT_LETTER;
+    }
+
+    // Route format for route clients (if configured)
+    if ($sale->client->route_sale) {
+        return Invoice::FORMAT_ROUTE;
+    }
+
+    // Default: ticket format
+    return Invoice::FORMAT_TICKET;
+}
+```
+
+## Printing Invoices
+
+### Controller Method
+
+```php app/Http/Controllers/Sales/InvoiceController.php
+public function print(Invoice $invoice)
+{
+    // Load all relationships
+    $invoice->load([
+        'sale.client',
+        'sale.items.product',
+        'sale.warehouse',
+        'sale.ncfLog',
+    ]);
+
+    // Select view based on format
+    $view = match($invoice->format_type) {
+        Invoice::FORMAT_LETTER => 'invoices.print.letter',
+        Invoice::FORMAT_ROUTE  => 'invoices.print.route',
+        default                => 'invoices.print.ticket',
+    };
+
+    // Generate PDF
+    $pdf = PDF::loadView($view, ['invoice' => $invoice]);
+
+    // Set paper size
+    $paperSize = match($invoice->format_type) {
+        Invoice::FORMAT_TICKET => [80, 297],  // 80mm width
+        Invoice::FORMAT_ROUTE  => [58, 297],  // 58mm width
+        default                => 'letter',
+    };
+
+    $pdf->setPaper($paperSize, 'portrait');
+
+    return $pdf->stream("invoice-{$invoice->invoice_number}.pdf");
+}
+```
+
+### From Sale
+
+```php app/Http/Controllers/Sales/SaleController.php
+public function printInvoice(Sale $sale)
+{
+    $invoice = $sale->invoice;
+
+    if (!$invoice) {
+        return back()->with('error', 'Esta venta aún no tiene una factura generada.');
+    }
+
+    return app(InvoiceController::class)->print($invoice);
+}
+```
+
+## Invoice Views
+
+### Ticket Template
+
+```blade resources/views/invoices/print/ticket.blade.php
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            width: 80mm;
+            margin: 0;
+            padding: 5mm;
+        }
+        .center { text-align: center; }
+        .bold { font-weight: bold; }
+        .line { border-bottom: 1px dashed #000; margin: 5px 0; }
+    </style>
+</head>
+<body>
+    <div class="center bold">
+        {{ config('app.name') }}
+    </div>
+    <div class="center">
+        RNC: {{ config('company.rnc') }}
+    </div>
+    
+    <div class="line"></div>
+
+    <div>Factura: {{ $invoice->invoice_number }}</div>
+    @if($invoice->sale->ncf)
+    <div>NCF: {{ $invoice->sale->ncf }}</div>
+    @endif
+    <div>Fecha: {{ $invoice->created_at->format('d/m/Y H:i') }}</div>
+    <div>Cliente: {{ $invoice->sale->client->display_name }}</div>
+
+    <div class="line"></div>
+
+    @foreach($invoice->sale->items as $item)
+    <div>
+        {{ $item->product->name }}
+        <br>
+        {{ $item->quantity }} x ${{ number_format($item->unit_price, 2) }}
+        = ${{ number_format($item->subtotal, 2) }}
+    </div>
+    @endforeach
+
+    <div class="line"></div>
+
+    <div class="bold">TOTAL: ${{ number_format($invoice->sale->total_amount, 2) }}</div>
+
+    @if($invoice->sale->payment_type === 'cash')
+    <div>Pago: Contado</div>
+    <div>Recibido: ${{ number_format($invoice->sale->cash_received, 2) }}</div>
+    <div>Cambio: ${{ number_format($invoice->sale->cash_change, 2) }}</div>
+    @else
+    <div>Pago: Crédito</div>
+    <div>Vence: {{ $invoice->due_date->format('d/m/Y') }}</div>
+    @endif
+
+    <div class="line"></div>
+    <div class="center">Gracias por su compra!</div>
+</body>
+</html>
+```
+
+## NCF Integration
+
+Invoices display the fiscal number when available:
+
+```php
+// Check if sale has NCF
+@if($invoice->sale->ncf)
+    <div>NCF: {{ $invoice->sale->ncf }}</div>
+@endif
+```
+
+**NCF Details:**
+
+```php
+$ncfLog = $invoice->sale->ncfLog;
+
+if ($ncfLog) {
+    echo "Type: {$ncfLog->ncfType->name}\n";
+    echo "Number: {$ncfLog->full_ncf}\n";
+    echo "Status: {$ncfLog->status}\n";
+}
+```
+
+## Invoice Cancellation
+
+When a sale is canceled, its invoice is also canceled:
+
+```php app/Services/Sales/InvoicesServices/InvoiceService.php
+public function cancelInvoice(Sale $sale): void
+{
+    $invoice = $sale->invoice;
+
+    if ($invoice) {
+        $invoice->update([
+            'status' => Invoice::STATUS_CANCELLED,
+        ]);
+    }
+}
+```
+
+<Warning>
+  Canceled invoices cannot be reprinted or reactivated. The sale must be recreated if the cancellation was an error.
+</Warning>
+
+## Querying Invoices
+
+### Recent Invoices
+
+```php
+$recentInvoices = Invoice::withIndexRelations()
+    ->latest()
+    ->take(50)
+    ->get();
+```
+
+### Invoices by Status
+
+```php
+$active = Invoice::where('status', Invoice::STATUS_ACTIVE)->count();
+$cancelled = Invoice::where('status', Invoice::STATUS_CANCELLED)->count();
+```
+
+### Invoices by Format
+
+```php
+$tickets = Invoice::where('format_type', Invoice::FORMAT_TICKET)->get();
+$letters = Invoice::where('format_type', Invoice::FORMAT_LETTER)->get();
+$routes = Invoice::where('format_type', Invoice::FORMAT_ROUTE)->get();
+```
+
+### Overdue Invoices (Credit)
+
+```php
+$overdue = Invoice::where('status', Invoice::STATUS_ACTIVE)
+    ->whereNotNull('due_date')
+    ->where('due_date', '<', now())
+    ->whereHas('sale', function($q) {
+        $q->where('payment_type', Sale::PAYMENT_CREDIT);
+    })
+    ->with('sale.client')
+    ->get();
+```
+
+## Optimized Loading
+
+```php app/Models/Sales/Invoice.php
+public function scopeWithIndexRelations($query)
+{
+    return $query->with([
+        'sale:id,number,payment_type,client_id,total_amount',
+        'sale.client:id,name',
+    ]);
+}
+```
+
+**Usage:**
+
+```php
+$invoices = Invoice::withIndexRelations()
+    ->paginate(50);
+
+// All data loaded efficiently
+foreach ($invoices as $invoice) {
+    echo "{$invoice->invoice_number} - {$invoice->sale->client->name}\n";
+}
+```
+
+## Format Icons
+
+```php
+public static function getFormatIcons(): array
+{
+    return [
+        self::FORMAT_TICKET => 'heroicon-s-printer',
+        self::FORMAT_LETTER => 'heroicon-s-document-text',
+        self::FORMAT_ROUTE  => 'heroicon-s-truck',
+    ];
+}
+```
+
+**Display in Blade:**
+
+```blade
+<x-icon :name="Invoice::getFormatIcons()[$invoice->format_type]" />
+{{ Invoice::getFormats()[$invoice->format_type] }}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Choose Appropriate Format">
+    Select format based on business context:
+
+    - **Ticket** - Fast retail transactions
+    - **Letter** - Credit sales, corporate clients
+    - **Route** - Mobile sales, deliveries
+
+    ```php
+    $format = $sale->payment_type === Sale::PAYMENT_CREDIT
+        ? Invoice::FORMAT_LETTER
+        : Invoice::FORMAT_TICKET;
+    ```
+  </Accordion>
+  <Accordion title="Include All Required Information">
+    Tax regulations require:
+    - Company name and RNC
+    - Invoice number
+    - NCF (if applicable)
+    - Date and time
+    - Client information
+    - Itemized products
+    - Total amount
+  </Accordion>
+  <Accordion title="Test Print Settings">
+    Configure printer settings for each format:
+
+    ```php
+    // Thermal printer settings
+    $pdf->setPaper([80, 297], 'portrait');
+    $pdf->setOption('dpi', 203);
+    $pdf->setOption('margin-top', 0);
+    $pdf->setOption('margin-bottom', 0);
+    ```
+  </Accordion>
+  <Accordion title="Preserve Canceled Invoices">
+    Never delete invoices - mark as cancelled:
+
+    ```php
+    // Wrong
+    $invoice->delete();
+
+    // Correct
+    $invoice->update(['status' => Invoice::STATUS_CANCELLED]);
+    ```
+
+    This maintains audit trails for tax compliance.
+  </Accordion>
+</AccordionGroup>
+
+## Customization
+
+### Company Branding
+
+Add logos and styling to templates:
+
+```blade
+<div class="header">
+    <img src="{{ public_path('images/logo.png') }}" width="150">
+    <h2>{{ config('company.name') }}</h2>
+    <p>{{ config('company.address') }}</p>
+    <p>Tel: {{ config('company.phone') }}</p>
+</div>
+```
+
+### Custom Layouts
+
+Create custom views for specific clients or industries:
+
+```php
+if ($invoice->sale->client->custom_template) {
+    $view = "invoices.custom.{$invoice->sale->client->template_name}";
+}
+```
+
+### Multi-Language Support
+
+```php
+@if(app()->getLocale() === 'en')
+    <div>Invoice Number: {{ $invoice->invoice_number }}</div>
+@else
+    <div>Número de Factura: {{ $invoice->invoice_number }}</div>
+@endif
+```
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Sales Module" icon="chart-line" href="/modules/sales">
+    Sale creation and management
+  </Card>
+  <Card title="NCF Generation" icon="file-invoice" href="/features/ncf-generation">
+    Fiscal number compliance
+  </Card>
+  <Card title="Invoice Model API" icon="code" href="/api/models/invoice">
+    Model reference
+  </Card>
+  <Card title="Point of Sale" icon="cash-register" href="/features/point-of-sale">
+    POS integration
+  </Card>
+</CardGroup>

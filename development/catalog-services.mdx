@@ -1,0 +1,512 @@
+---
+title: 'Catalog Services'
+description: 'Provide data for dropdowns, filters, and form selects with country-aware filtering'
+icon: 'list'
+---
+
+## Overview
+
+Catalog Services are responsible for providing data to populate UI elements like dropdowns, filters, and form selects. They centralize data queries and apply global filters (like `country_id`) automatically.
+
+<Tip>
+  Catalog Services should always be read-only. They provide data for UI consumption but never modify database records.
+</Tip>
+
+## Naming Convention
+
+Catalog Services follow a strict naming pattern:
+
+```
+app/Services/[Module]/[Module]CatalogService.php
+```
+
+**Examples:**
+- `app/Services/Sales/SalesServices/SaleCatalogService.php`
+- `app/Services/Client/ClientCatalogService.php`
+- `app/Services/Inventory/WarehouseService/WarehouseCatalogService.php`
+
+## Standard Methods
+
+Every Catalog Service should implement two primary methods:
+
+### getForFilters()
+
+Provides data for filter dropdowns in index/list views. Returns minimal data optimized for filtering.
+
+### getForForm()
+
+Provides comprehensive data for create/edit forms. Includes related data and computed fields.
+
+## Real-World Example: Sales Module
+
+Let's examine the complete `SaleCatalogService` from the system:
+
+```php app/Services/Sales/SalesServices/SaleCatalogService.php
+<?php
+
+namespace App\Services\Sales\SalesServices;
+
+use App\Models\Sales\Sale;
+use App\Models\Clients\Client;
+use App\Models\Inventory\{Warehouse, InventoryStock};
+use App\Models\Accounting\{AccountingAccount, DocumentType};
+use App\Models\Configuration\TipoPago;
+
+class SaleCatalogService
+{
+    /**
+     * Data for sales table filters
+     */
+    public function getForFilters(): array
+    {
+        return [
+            // Only clients that have sales
+            'clients' => Client::whereHas('sales')
+                ->select('id', 'name')
+                ->orderBy('name')
+                ->get(),
+
+            'warehouses' => Warehouse::select('id', 'name')
+                ->orderBy('name')
+                ->get(),
+
+            // Static data from model constants
+            'payment_types' => Sale::getPaymentTypes(),
+            
+            'tipo_pagos' => TipoPago::activo()
+                ->select('id', 'nombre')
+                ->get(),
+
+            'statuses' => Sale::getStatuses(),
+        ];
+    }
+
+    /**
+     * Data for sale form (POS)
+     */
+    public function getForForm(): array
+    {
+        return [
+            // 1. Clients with credit status
+            'clients' => Client::with('estadoCliente.categoria')
+                ->whereHas('estadoCliente.categoria', function ($query) {
+                    $query->whereIn('code', ['OPERATIVO', 'FINANCIERO_RESTRICTO']);
+                })
+                ->select('id', 'name', 'tax_id', 'credit_limit', 'balance', 'estado_cliente_id')
+                // Prioritize "Consumidor Final"
+                ->orderByRaw("CASE WHEN name = 'Consumidor Final' THEN 0 ELSE 1 END")
+                ->orderBy('name')
+                ->get()
+                ->map(function ($client) {
+                    return [
+                        'id'           => $client->id,
+                        'name'         => $client->name,
+                        'tax_id'       => $client->tax_id,
+                        'credit_limit' => $client->credit_limit,
+                        'balance'      => $client->balance,
+                        'available'    => $client->credit_limit - $client->balance,
+                        'is_moroso'    => ($client->estadoCliente->categoria->code ?? '') === 'FINANCIERO_RESTRICTO',
+                        'status_name'  => $client->estadoCliente->nombre ?? 'N/A',
+                    ];
+                }),
+
+            // 2. Warehouses
+            'warehouses' => Warehouse::select('id', 'name', 'type')
+                ->get(),
+
+            // 3. Products with available stock
+            'products' => InventoryStock::with(['product' => function($query) {
+                    $query->select('id', 'name', 'price');
+                }])
+                ->where('quantity', '>', 0)
+                ->get()
+                ->filter(fn($stock) => $stock->product !== null)
+                ->map(function ($stock) {
+                    return [
+                        'id'           => $stock->product_id,
+                        'name'         => $stock->product->name,
+                        'price'        => $stock->product->price,
+                        'warehouse_id' => $stock->warehouse_id,
+                        'stock'        => $stock->quantity,
+                    ];
+                })->values()->toArray(),
+
+            // 4. Document configuration
+            'document_config' => DocumentType::where('code', 'FAC')
+                ->select('id', 'prefix', 'current_number')
+                ->first(),
+
+            'payment_types' => Sale::getPaymentTypes(),
+            
+            // Default cash account
+            'default_cash_account' => AccountingAccount::where('code', '1.1.01')
+                ->select('id', 'name', 'code')
+                ->first(),
+
+            // Active NCF types with available sequences
+            'ncf_types' => \App\Models\Sales\Ncf\NcfType::whereHas('sequences', function($q) {
+                    $q->where('status', \App\Models\Sales\Ncf\NcfSequence::STATUS_ACTIVE)
+                        ->where('expiry_date', '>=', now())
+                        ->whereColumn('current', '<', 'to');
+                })
+                ->get()
+                ->map(function($type) {
+                    return [
+                        'id' => $type->id,
+                        'name' => $type->name,
+                        'code' => $type->code,
+                        'is_electronic' => $type->is_electronic
+                    ];
+                }),
+                
+            'tipo_pagos' => TipoPago::activo()
+                ->select('id', 'nombre', 'accounting_account_id')
+                ->get(),
+        ];
+    }
+}
+```
+
+## Key Patterns
+
+### 1. Country-Aware Filtering
+
+Many catalogs need to filter by the system's configured country:
+
+```php app/Services/Client/ClientCatalogService.php
+public function getForForm(): array
+{
+    $config = general_config();
+    $countryId = $config?->country_id;
+
+    return [
+        'states' => $countryId 
+            ? State::byCountry($countryId)->select('id', 'name')->orderBy('name')->get()
+            : collect(),
+            
+        'taxIdentifierTypes' => $countryId 
+            ? TaxIdentifierType::byCountry($countryId)->select('id', 'code', 'name')->get()
+            : collect(),
+    ];
+}
+```
+
+### 2. Computed Fields
+
+Add computed fields that the frontend needs but aren't stored in the database:
+
+```php
+'clients' => Client::with('estadoCliente')
+    ->get()
+    ->map(function ($client) {
+        return [
+            'id'           => $client->id,
+            'name'         => $client->name,
+            'balance'      => $client->balance,
+            'credit_limit' => $client->credit_limit,
+            // Computed field
+            'available'    => $client->credit_limit - $client->balance,
+        ];
+    }),
+```
+
+### 3. Conditional Data Loading
+
+Only load data when relationships exist:
+
+```php
+'products' => InventoryStock::with(['product'])
+    ->where('quantity', '>', 0)
+    ->get()
+    // Filter out stocks without products
+    ->filter(fn($stock) => $stock->product !== null)
+    ->map(function ($stock) {
+        return [
+            'id'    => $stock->product_id,
+            'name'  => $stock->product->name,
+            'stock' => $stock->quantity,
+        ];
+    })->values()->toArray(),
+```
+
+### 4. Custom Sorting
+
+Prioritize specific records using SQL:
+
+```php
+'clients' => Client::query()
+    // "Consumidor Final" appears first
+    ->orderByRaw("CASE WHEN name = 'Consumidor Final' THEN 0 ELSE 1 END")
+    ->orderBy('name')
+    ->get(),
+```
+
+### 5. Scoped Queries
+
+Use model scopes for reusable filters:
+
+```php
+'tipo_pagos' => TipoPago::activo()  // Using activo() scope
+    ->select('id', 'nombre')
+    ->get(),
+```
+
+## Performance Optimization
+
+<Warning>
+  Always select only the fields you need. Never use `Model::all()` or select all columns unnecessarily.
+</Warning>
+
+### Select Specific Columns
+
+```php
+// ❌ Bad - Loads all columns
+'clients' => Client::all()
+
+// ✅ Good - Only required fields
+'clients' => Client::select('id', 'name', 'tax_id')
+    ->orderBy('name')
+    ->get()
+```
+
+### Eager Loading
+
+Use eager loading to avoid N+1 queries:
+
+```php
+// Load related data efficiently
+'clients' => Client::with('estadoCliente.categoria')
+    ->select('id', 'name', 'estado_cliente_id')
+    ->get()
+```
+
+### Selective Eager Loading
+
+Limit fields in eager loaded relationships:
+
+```php
+'products' => InventoryStock::with(['product' => function($query) {
+        // Only load specific product fields
+        $query->select('id', 'name', 'price');
+    }])
+    ->where('quantity', '>', 0)
+    ->get()
+```
+
+## Static vs Dynamic Data
+
+### Static Data (Model Constants)
+
+For fixed options, use model constants:
+
+```php app/Models/Sales/Sale.php
+class Sale extends Model
+{
+    const PAYMENT_CASH   = 'cash';
+    const PAYMENT_CREDIT = 'credit';
+
+    public static function getPaymentTypes(): array
+    {
+        return [
+            self::PAYMENT_CASH   => 'Contado',
+            self::PAYMENT_CREDIT => 'Crédito',
+        ];
+    }
+}
+```
+
+Then reference in catalog:
+
+```php
+'payment_types' => Sale::getPaymentTypes(),
+```
+
+### Dynamic Data (Database)
+
+For configurable options, query the database:
+
+```php
+'warehouses' => Warehouse::select('id', 'name')
+    ->orderBy('name')
+    ->get(),
+```
+
+## Controller Integration
+
+Here's how to use Catalog Services in controllers:
+
+```php app/Http/Controllers/Sales/SaleController.php
+class SaleController extends Controller
+{
+    public function __construct(
+        protected SaleService $service,
+        protected SaleCatalogService $catalogService
+    ) {}
+
+    /**
+     * Show the create form
+     */
+    public function create()
+    {
+        return view('sales.create', $this->catalogService->getForForm());
+    }
+
+    /**
+     * Display index with filters
+     */
+    public function index(Request $request)
+    {
+        $sales = (new SaleFilters($request))
+            ->apply(Sale::query()->withIndexRelations())
+            ->latest()
+            ->paginate(10);
+
+        $catalogs = $this->catalogService->getForFilters();
+
+        return view('sales.index', array_merge(
+            ['items' => $sales],
+            $catalogs  // Spreads all catalog data
+        ));
+    }
+}
+```
+
+## Template Example
+
+Use this template for new Catalog Services:
+
+```php app/Services/[Module]/[Module]CatalogService.php
+<?php
+
+namespace App\Services\Module;
+
+use App\Models\Module;
+
+class ModuleCatalogService
+{
+    /**
+     * Data for filter dropdowns in index view
+     */
+    public function getForFilters(): array
+    {
+        return [
+            // Minimal data for filtering
+            'statuses' => Module::getStatuses(),
+            
+            'categories' => Category::select('id', 'name')
+                ->orderBy('name')
+                ->get(),
+        ];
+    }
+
+    /**
+     * Data for create/edit forms
+     */
+    public function getForForm(): array
+    {
+        $countryId = general_config()?->country_id;
+
+        return [
+            // Comprehensive data for forms
+            'categories' => Category::select('id', 'name', 'code')
+                ->orderBy('name')
+                ->get(),
+                
+            'states' => $countryId
+                ? State::byCountry($countryId)->select('id', 'name')->get()
+                : collect(),
+                
+            'statuses' => Module::getStatuses(),
+        ];
+    }
+}
+```
+
+## Testing Catalog Services
+
+Catalog Services are easy to unit test:
+
+```php tests/Unit/Services/SaleCatalogServiceTest.php
+use App\Services\Sales\SalesServices\SaleCatalogService;
+use Tests\TestCase;
+
+class SaleCatalogServiceTest extends TestCase
+{
+    protected SaleCatalogService $service;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->service = new SaleCatalogService();
+    }
+
+    public function test_get_for_filters_returns_array()
+    {
+        $result = $this->service->getForFilters();
+
+        $this->assertIsArray($result);
+        $this->assertArrayHasKey('payment_types', $result);
+        $this->assertArrayHasKey('statuses', $result);
+    }
+
+    public function test_get_for_form_includes_clients()
+    {
+        $result = $this->service->getForForm();
+
+        $this->assertArrayHasKey('clients', $result);
+        $this->assertIsArray($result['clients']);
+    }
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Read-Only" icon="lock">
+    Catalog Services should never modify data. They only provide it for UI consumption.
+  </Card>
+  
+  <Card title="Optimize Queries" icon="bolt">
+    Always select specific columns and use eager loading to prevent N+1 queries.
+  </Card>
+  
+  <Card title="Apply Global Filters" icon="globe">
+    Respect system-wide settings like `country_id` when filtering data.
+  </Card>
+  
+  <Card title="Consistent Structure" icon="table-cells">
+    Return arrays with consistent keys. Always include `id` and display fields.
+  </Card>
+</CardGroup>
+
+## Common Pitfalls
+
+<Warning>
+  **Avoid these common mistakes:**
+  
+  1. **Loading too much data** - Don't use `::all()` or select unnecessary columns
+  2. **N+1 queries** - Always use `with()` for related data
+  3. **Ignoring country filters** - Apply country-based filtering where relevant
+  4. **Modifying data** - Catalog Services are read-only
+  5. **Complex business logic** - Keep it simple, complex logic belongs in Business Services
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Business Services" icon="gear" href="/development/business-services">
+    Learn how to implement write operations and business logic
+  </Card>
+  
+  <Card title="Form Requests" icon="shield-check" href="/development/form-requests">
+    Validate data before it reaches services
+  </Card>
+  
+  <Card title="Adding Modules" icon="cube-plus" href="/development/adding-modules">
+    Complete guide to implementing new modules
+  </Card>
+  
+  <Card title="Models" icon="database" href="/architecture/models">
+    Understand model relationships and scopes
+  </Card>
+</CardGroup>

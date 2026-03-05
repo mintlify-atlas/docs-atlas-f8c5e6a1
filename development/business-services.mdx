@@ -1,0 +1,798 @@
+---
+title: 'Business Services'
+description: 'Implement business logic, database transactions, and complex operations in service classes'
+icon: 'gear'
+---
+
+## Overview
+
+Business Services contain all write operations and business logic. Controllers should **never** directly call `Model::create()` or manage `DB::transaction()`. All of that belongs in services.
+
+<Warning>
+  Controllers are orchestrators, not executors. Business logic must be encapsulated in service classes.
+</Warning>
+
+## Naming Convention
+
+Business Services follow this pattern:
+
+```
+app/Services/[Module]/[Module]Service.php
+```
+
+**Examples:**
+- `app/Services/Sales/SalesServices/SaleService.php`
+- `app/Services/Client/ClientService.php`
+- `app/Services/Inventory/InventoryStockService/InventoryStockService.php`
+
+## Core Responsibilities
+
+Business Services handle:
+
+1. **Create operations** with database transactions
+2. **Update operations** with validation logic
+3. **Delete operations** (soft deletes)
+4. **Bulk actions** on multiple records
+5. **Complex calculations** and business rules
+6. **Integration** with other services
+7. **Accounting entries** and financial operations
+
+## Constructor Dependency Injection
+
+Services often depend on other services. Use constructor injection:
+
+```php app/Services/Sales/SalesServices/SaleService.php
+class SaleService
+{
+    public function __construct(
+        protected InventoryMovementService $inventoryService,
+        protected JournalEntryService $journalService,
+        protected ReceivableService $receivableService,
+        protected InvoiceService $invoiceService,
+        protected NcfGeneratorInterface $ncfGenerator
+    ) {}
+}
+```
+
+## Standard Methods
+
+Every Business Service should implement these methods:
+
+### create(array $data)
+
+Creates a new record with all related operations.
+
+### update(Model $model, array $data)
+
+Updates an existing record.
+
+### performBulkAction(array $ids, string $action, $value = null)
+
+Performs actions on multiple records.
+
+### getActionLabel(string $action)
+
+Returns human-readable labels for bulk actions.
+
+## Real-World Example: Sale Service
+
+Let's examine the complete `SaleService`:
+
+```php app/Services/Sales/SalesServices/SaleService.php
+<?php
+
+namespace App\Services\Sales\SalesServices;
+
+use App\Models\Sales\Sale;
+use App\Models\Accounting\{DocumentType, JournalEntry, AccountingAccount, Receivable};
+use App\Models\Inventory\InventoryMovement;
+use App\Services\Inventory\InventoryMovementService;
+use App\Services\Accounting\JournalEntries\JournalEntryService;
+use App\Services\Accounting\Receivable\ReceivableService;
+use Illuminate\Support\Facades\{DB, Auth};
+use App\Services\Sales\InvoicesServices\InvoiceService;
+use App\Contracts\Sales\NcfGeneratorInterface;
+use App\Models\Sales\Ncf\NcfLog;
+use Carbon\Carbon;
+use Exception;
+
+class SaleService
+{
+    public function __construct(
+        protected InventoryMovementService $inventoryService,
+        protected JournalEntryService $journalService,
+        protected ReceivableService $receivableService,
+        protected InvoiceService $invoiceService,
+        protected NcfGeneratorInterface $ncfGenerator
+    ) {}
+
+    public function create(array $data): Sale
+    {
+        return DB::transaction(function () use ($data) {
+            // 1. Generate document number
+            $docType = DocumentType::where('code', 'FAC')->firstOrFail();
+            $saleNumber = $docType->getNextNumberFormatted();
+            $docType->increment('current_number');
+
+            // 2. Create sale record
+            $sale = Sale::create([
+                'document_type_id' => $docType->id,
+                'number'           => $saleNumber,
+                'client_id'        => $data['client_id'],
+                'warehouse_id'     => $data['warehouse_id'],
+                'user_id'          => Auth::id(),
+                'sale_date'        => isset($data['sale_date']) 
+                                        ? Carbon::parse($data['sale_date'])->setTimeFrom(now()) 
+                                        : now(),
+                'total_amount'     => $data['total_amount'],
+                'payment_type'     => $data['payment_type'],
+                'tipo_pago_id'     => $data['payment_type'] === Sale::PAYMENT_CASH 
+                                        ? $data['tipo_pago_id'] : null,
+                'cash_received'    => $data['payment_type'] === Sale::PAYMENT_CASH 
+                                        ? ($data['cash_received'] ?? 0) : 0,
+                'cash_change'      => $data['payment_type'] === Sale::PAYMENT_CASH 
+                                        ? ($data['cash_change'] ?? 0) : 0,
+                'status'           => Sale::STATUS_COMPLETED,
+                'notes'            => $data['notes'] ?? null,
+            ]);
+
+            // 3. Generate NCF if required
+            if (isset($data['ncf_type_id'])) {
+                $fullNcf = $this->ncfGenerator->generate($sale, $data['ncf_type_id']);
+                $sale->update(['ncf' => $fullNcf]);
+            }
+
+            // 4. Create sale items and adjust inventory
+            foreach ($data['items'] as $item) {
+                $sale->items()->create([
+                    'product_id' => $item['product_id'],
+                    'quantity'   => $item['quantity'],
+                    'unit_price' => $item['price'],
+                    'subtotal'   => $item['quantity'] * $item['price'],
+                ]);
+
+                // Register inventory movement
+                $this->inventoryService->register([
+                    'warehouse_id'   => $data['warehouse_id'],
+                    'product_id'     => $item['product_id'],
+                    'quantity'       => $item['quantity'],
+                    'type'           => InventoryMovement::TYPE_OUTPUT,
+                    'description'    => "Venta {$saleNumber}",
+                    'reference_type' => Sale::class,
+                    'reference_id'   => $sale->id,
+                ]);
+            }
+
+            // 5. Handle payment type
+            if ($sale->payment_type === Sale::PAYMENT_CASH) {
+                $this->generateSaleAccountingEntry($sale);
+            } else {
+                $this->receivableService->createReceivable([
+                    'client_id'       => $sale->client_id,
+                    'total_amount'    => $sale->total_amount,
+                    'emission_date'   => $sale->sale_date,
+                    'due_date'        => $sale->sale_date->copy()->addDays(30),
+                    'document_number' => $sale->number,
+                    'reference_type'  => Sale::class,
+                    'reference_id'    => $sale->id,
+                    'description'     => "Venta a crédito registrada desde POS"
+                ]);
+            }
+
+            // 6. Create invoice
+            $this->invoiceService->createFromSale($sale);
+            
+            return $sale;
+        });
+    }
+
+    public function cancel(Sale $sale, ?string $reason = null): bool
+    {
+        return DB::transaction(function () use ($sale, $reason) {
+            if ($sale->status === Sale::STATUS_CANCELED) {
+                throw new Exception("La venta ya se encuentra anulada.");
+            }
+
+            // 1. Handle financial reversal (Receivables)
+            if ($sale->payment_type === Sale::PAYMENT_CREDIT) {
+                $receivable = Receivable::where('reference_type', Sale::class)
+                    ->where('reference_id', $sale->id)
+                    ->first();
+
+                if ($receivable) {
+                    if ($receivable->current_balance < $receivable->total_amount 
+                        || $receivable->status === Receivable::STATUS_PAID) {
+                        throw new Exception("No se puede anular: El cliente ya tiene abonos.");
+                    }
+                    $this->receivableService->cancelReceivable($receivable);
+                }
+            }
+
+            // 2. Update NCF log
+            NcfLog::where('sale_id', $sale->id)
+                ->update([
+                    'status' => NcfLog::STATUS_VOIDED,
+                    'cancellation_reason' => $reason ?? 'Anulación de venta manual'
+                ]);
+
+            // 3. Reverse accounting entries
+            $this->generateCancellationAccountingEntry($sale);
+
+            // 4. Reverse inventory movements
+            foreach ($sale->items as $item) {
+                $this->inventoryService->register([
+                    'warehouse_id'   => $sale->warehouse_id,
+                    'product_id'     => $item->product_id,
+                    'quantity'       => $item->quantity,
+                    'type'           => InventoryMovement::TYPE_ADJUSTMENT,
+                    'description'    => "Reversión de costo por anulación {$sale->number}",
+                    'reference_type' => Sale::class,
+                    'reference_id'   => $sale->id,
+                ]);
+            }
+
+            // 5. Cancel invoice
+            $this->invoiceService->cancelInvoice($sale);
+            
+            return $sale->update(['status' => Sale::STATUS_CANCELED]);
+        });
+    }
+
+    protected function generateSaleAccountingEntry(Sale $sale)
+    {
+        $incomeAccount = AccountingAccount::where('code', '4.1')->first();
+        
+        // Use payment type's account or default cash account
+        $debitAccountId = $sale->tipoPago?->accounting_account_id 
+                        ?? AccountingAccount::where('code', '1.1.01')->value('id');
+
+        if (!$debitAccountId || !$incomeAccount) {
+            throw new Exception("Configuración contable incompleta.");
+        }
+
+        $this->journalService->create([
+            'entry_date'  => $sale->sale_date,
+            'reference'   => $sale->number,
+            'description' => "Venta Contado ({$sale->tipoPago->nombre}) - {$sale->client->name}",
+            'status'      => JournalEntry::STATUS_POSTED,
+            'items' => [
+                [
+                    'accounting_account_id' => $debitAccountId,
+                    'debit' => $sale->total_amount,
+                    'credit' => 0
+                ],
+                [
+                    'accounting_account_id' => $incomeAccount->id,
+                    'debit' => 0,
+                    'credit' => $sale->total_amount
+                ]
+            ]
+        ]);
+    }
+    
+    protected function generateCancellationAccountingEntry(Sale $sale)
+    {
+        $incomeAccount = AccountingAccount::where('code', '4.1')->first();
+        
+        if ($sale->payment_type === Sale::PAYMENT_CASH) {
+            $contraAccount = AccountingAccount::where('code', '1.1.01')->first();
+        } else {
+            $contraAccount = $sale->client->accountingAccount 
+                ?? AccountingAccount::where('code', '1.1.02')->first();
+        }
+
+        $this->journalService->create([
+            'entry_date'  => now(),
+            'reference'   => "REV-{$sale->number}",
+            'description' => "Anulación Venta {$sale->number}",
+            'status'      => JournalEntry::STATUS_POSTED,
+            'items' => [
+                [
+                    'accounting_account_id' => $incomeAccount->id,
+                    'debit' => $sale->total_amount,
+                    'credit' => 0
+                ],
+                [
+                    'accounting_account_id' => $contraAccount->id,
+                    'debit' => 0,
+                    'credit' => $sale->total_amount
+                ]
+            ]
+        ]);
+    }
+}
+```
+
+## Key Patterns
+
+### 1. Database Transactions
+
+Always wrap operations that modify multiple tables in transactions:
+
+```php
+public function create(array $data): Model
+{
+    return DB::transaction(function () use ($data) {
+        // All database operations here
+        $model = Model::create($data);
+        
+        // Related operations
+        $this->otherService->doSomething($model);
+        
+        return $model;
+    });
+}
+```
+
+### 2. Service Integration
+
+Call other services for related operations:
+
+```php
+// Register inventory movement via service
+$this->inventoryService->register([
+    'warehouse_id' => $data['warehouse_id'],
+    'product_id'   => $item['product_id'],
+    'quantity'     => $item['quantity'],
+    'type'         => InventoryMovement::TYPE_OUTPUT,
+]);
+
+// Generate accounting entry via service
+$this->journalService->create([
+    'entry_date'  => now(),
+    'reference'   => $sale->number,
+    'description' => "Sale {$sale->number}",
+]);
+```
+
+### 3. Validation and Guard Clauses
+
+Validate state before executing operations:
+
+```php
+public function cancel(Sale $sale): bool
+{
+    // Guard clause
+    if ($sale->status === Sale::STATUS_CANCELED) {
+        throw new Exception("Sale is already canceled.");
+    }
+    
+    // Check if client has payments
+    if ($receivable->current_balance < $receivable->total_amount) {
+        throw new Exception("Cannot cancel: Client has made payments.");
+    }
+    
+    // Proceed with cancellation
+    return DB::transaction(function () use ($sale) {
+        // ...
+    });
+}
+```
+
+### 4. Bulk Operations
+
+Handle multiple records efficiently:
+
+```php app/Services/Client/ClientService.php
+public function performBulkAction(array $ids, string $action, $value = null): int
+{
+    return DB::transaction(function () use ($ids, $action, $value) {
+        $query = Client::whereIn('id', $ids);
+        $count = count($ids);
+
+        match ($action) {
+            'delete'           => $query->delete(),
+            'change_status'    => $query->update(['estado_cliente_id' => $value]),
+            'change_geo_state' => $query->update(['state_id' => $value]),
+            'reset_credit'     => $query->update(['credit_limit' => 0]),
+            default => throw new \InvalidArgumentException("Unsupported action"),
+        };
+
+        return $count;
+    });
+}
+
+public function getActionLabel(string $action): string
+{
+    return match ($action) {
+        'delete'           => 'deleted',
+        'change_status'    => 'updated status',
+        'change_geo_state' => 'updated location',
+        'reset_credit'     => 'removed credit limit',
+        default            => 'processed',
+    };
+}
+```
+
+### 5. Helper Methods
+
+Extract complex logic into protected methods:
+
+```php
+protected function generateSaleAccountingEntry(Sale $sale)
+{
+    $incomeAccount = AccountingAccount::where('code', '4.1')->first();
+    $debitAccountId = $sale->tipoPago?->accounting_account_id 
+                    ?? AccountingAccount::where('code', '1.1.01')->value('id');
+
+    if (!$debitAccountId || !$incomeAccount) {
+        throw new Exception("Incomplete accounting configuration.");
+    }
+
+    $this->journalService->create([...]);
+}
+```
+
+## Client Service Example
+
+Here's another complete example with accounting integration:
+
+```php app/Services/Client/ClientService.php
+<?php
+
+namespace App\Services\Client;
+
+use App\Models\Clients\Client;
+use App\Models\Accounting\AccountingAccount;
+use Illuminate\Support\Facades\DB;
+
+class ClientService
+{
+    /**
+     * Generate unique accounting code considering soft deletes
+     */
+    private function generateUniqueAccountingCode(AccountingAccount $parent): string
+    {
+        // Include soft-deleted records in the count
+        $lastChild = AccountingAccount::withTrashed()
+            ->where('parent_id', $parent->id)
+            ->orderBy('code', 'desc')
+            ->first();
+
+        // Extract sequential number (e.g., from 1.1.02.0003 take 0003)
+        $nextNumber = $lastChild ? (int) substr($lastChild->code, -4) + 1 : 1;
+        
+        return $parent->code . '.' . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+    }
+
+    public function createClient(array $data): Client
+    {
+        return DB::transaction(function () use ($data) {
+            // Create accounting account if requested
+            if (!empty($data['create_accounting_account'])) {
+                $parentAccount = AccountingAccount::where('code', '1.1.02')->first();
+                
+                if ($parentAccount) {
+                    $newCode = $this->generateUniqueAccountingCode($parentAccount);
+
+                    $newAccount = AccountingAccount::create([
+                        'parent_id'     => $parentAccount->id,
+                        'code'          => $newCode,
+                        'name'          => "CxC - " . $data['name'],
+                        'type'          => $parentAccount->type,
+                        'level'         => $parentAccount->level + 1,
+                        'is_selectable' => true
+                    ]);
+
+                    $data['accounting_account_id'] = $newAccount->id;
+                }
+            }
+
+            return Client::create($data);
+        });
+    }
+
+    public function updateClient(Client $client, array $data): bool
+    {
+        return DB::transaction(function () use ($client, $data) {
+            $oldAccountId = $client->accounting_account_id;
+
+            // 1. Create new account if requested
+            if (!empty($data['create_accounting_account'])) {
+                $parentAccount = AccountingAccount::where('code', '1.1.02')->first();
+                if ($parentAccount) {
+                    $newCode = $this->generateUniqueAccountingCode($parentAccount);
+                    $newAccount = AccountingAccount::create([
+                        'parent_id' => $parentAccount->id,
+                        'code'      => $newCode,
+                        'name'      => "CxC - " . ($data['name'] ?? $client->name),
+                        'type'      => $parentAccount->type,
+                        'level'     => $parentAccount->level + 1,
+                        'is_selectable' => true
+                    ]);
+                    $data['accounting_account_id'] = $newAccount->id;
+                }
+            }
+
+            // 2. Clean up old account if changed
+            if ($oldAccountId && array_key_exists('accounting_account_id', $data)) {
+                if (empty($data['accounting_account_id']) 
+                    || $oldAccountId != $data['accounting_account_id']) {
+                    
+                    $oldAccount = AccountingAccount::find($oldAccountId);
+                    
+                    // Validate it's a client account before deleting (parent_id 4 = 1.1.02)
+                    if ($oldAccount && $oldAccount->parent_id == 4) {
+                        // Check for balance
+                        $balance = DB::table('accounting_entries')
+                                    ->where('accounting_account_id', $oldAccountId)
+                                    ->sum('amount');
+
+                        if ($balance != 0) {
+                            throw new \Exception(
+                                "Cannot unlink account with pending balance: " 
+                                . number_format($balance, 2)
+                            );
+                        }
+                        
+                        $oldAccount->delete();
+                    }
+                }
+            }
+
+            return $client->update($data);
+        });
+    }
+}
+```
+
+## Controller Integration
+
+Here's how controllers use Business Services:
+
+```php app/Http/Controllers/Sales/SaleController.php
+class SaleController extends Controller
+{
+    public function __construct(
+        protected SaleService $service,
+        protected SaleCatalogService $catalogService
+    ) {}
+
+    /**
+     * Store a new sale
+     */
+    public function store(StoreSaleRequest $request)
+    {
+        try {
+            // Service handles all complexity
+            $sale = $this->service->create($request->validated());
+
+            return redirect()
+                ->route('sales.index')
+                ->with('success', "Sale #{$sale->number} registered successfully.");
+        } catch (Exception $e) {
+            return back()
+                ->withInput()
+                ->with('error', "Error: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Cancel a sale
+     */
+    public function cancel(Request $request, Sale $sale)
+    {
+        // Quick state check
+        if ($sale->status === Sale::STATUS_CANCELED) {
+            return back()->with('error', "Sale already canceled.");
+        }
+
+        $validated = $request->validate([
+            'cancellation_reason' => 'required|string|min:5|max:255'
+        ]);
+
+        try {
+            $this->service->cancel($sale, $validated['cancellation_reason']);
+            
+            return back()->with('success', "Sale {$sale->number} canceled.");
+        } catch (Exception $e) {
+            Log::error("Error canceling sale {$sale->id}: " . $e->getMessage());
+            return back()->with('error', "Error: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Bulk actions
+     */
+    public function bulk(BulkSaleRequest $request)
+    {
+        $count = $this->service->performBulkAction(
+            $request->input('ids'),
+            $request->input('action'),
+            $request->input('value')
+        );
+
+        $label = $this->service->getActionLabel($request->input('action'));
+
+        return back()->with('success', "{$count} sales {$label}.");
+    }
+}
+```
+
+## Service Template
+
+Use this template for new Business Services:
+
+```php app/Services/[Module]/[Module]Service.php
+<?php
+
+namespace App\Services\Module;
+
+use App\Models\Module;
+use Illuminate\Support\Facades\DB;
+use Exception;
+
+class ModuleService
+{
+    /**
+     * Inject dependencies
+     */
+    public function __construct(
+        protected RelatedService $relatedService
+    ) {}
+
+    /**
+     * Create a new module record
+     */
+    public function create(array $data): Module
+    {
+        return DB::transaction(function () use ($data) {
+            $module = Module::create($data);
+            
+            // Related operations
+            if (isset($data['related_items'])) {
+                foreach ($data['related_items'] as $item) {
+                    $module->items()->create($item);
+                }
+            }
+            
+            return $module;
+        });
+    }
+
+    /**
+     * Update an existing module
+     */
+    public function update(Module $module, array $data): bool
+    {
+        return DB::transaction(function () use ($module, $data) {
+            return $module->update($data);
+        });
+    }
+
+    /**
+     * Perform bulk action on multiple records
+     */
+    public function performBulkAction(array $ids, string $action, $value = null): int
+    {
+        return DB::transaction(function () use ($ids, $action, $value) {
+            $query = Module::whereIn('id', $ids);
+            $count = count($ids);
+
+            match ($action) {
+                'delete'     => $query->delete(),
+                'activate'   => $query->update(['is_active' => true]),
+                'deactivate' => $query->update(['is_active' => false]),
+                default => throw new \InvalidArgumentException("Unsupported action"),
+            };
+
+            return $count;
+        });
+    }
+
+    /**
+     * Get human-readable label for action
+     */
+    public function getActionLabel(string $action): string
+    {
+        return match ($action) {
+            'delete'     => 'deleted',
+            'activate'   => 'activated',
+            'deactivate' => 'deactivated',
+            default      => 'processed',
+        };
+    }
+}
+```
+
+## Testing Business Services
+
+Business Services are designed to be easily testable:
+
+```php tests/Unit/Services/SaleServiceTest.php
+use App\Services\Sales\SalesServices\SaleService;
+use App\Models\Sales\Sale;
+use Tests\TestCase;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class SaleServiceTest extends TestCase
+{
+    use RefreshDatabase;
+
+    protected SaleService $service;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->service = app(SaleService::class);
+    }
+
+    public function test_create_generates_sale_number()
+    {
+        $data = [
+            'client_id' => Client::factory()->create()->id,
+            'warehouse_id' => Warehouse::factory()->create()->id,
+            'total_amount' => 100.00,
+            'payment_type' => Sale::PAYMENT_CASH,
+            'items' => [
+                ['product_id' => 1, 'quantity' => 1, 'price' => 100]
+            ],
+        ];
+
+        $sale = $this->service->create($data);
+
+        $this->assertNotNull($sale->number);
+        $this->assertEquals(Sale::STATUS_COMPLETED, $sale->status);
+    }
+
+    public function test_cancel_prevents_double_cancellation()
+    {
+        $sale = Sale::factory()->create(['status' => Sale::STATUS_CANCELED]);
+
+        $this->expectException(Exception::class);
+        $this->service->cancel($sale);
+    }
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Transactions" icon="shield">
+    Wrap all multi-table operations in `DB::transaction()` for data integrity.
+  </Card>
+  
+  <Card title="Service Integration" icon="link">
+    Call other services for related operations. Don't duplicate logic.
+  </Card>
+  
+  <Card title="Guard Clauses" icon="ban">
+    Validate state early and throw exceptions for invalid operations.
+  </Card>
+  
+  <Card title="Extract Helpers" icon="code">
+    Move complex logic into protected helper methods for clarity.
+  </Card>
+</CardGroup>
+
+## Common Pitfalls
+
+<Warning>
+  **Avoid these mistakes:**
+  
+  1. **No transactions** - Always use DB::transaction for multi-step operations
+  2. **Logic in controllers** - Keep controllers thin, move logic to services
+  3. **Duplicate code** - Extract common operations into helper methods
+  4. **Poor error handling** - Use exceptions and meaningful error messages
+  5. **Missing validation** - Validate state before operations (guard clauses)
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Form Requests" icon="shield-check" href="/development/form-requests">
+    Learn how to validate data before it reaches services
+  </Card>
+  
+  <Card title="Catalog Services" icon="list" href="/development/catalog-services">
+    Provide data for dropdowns and filters
+  </Card>
+  
+  <Card title="Testing" icon="vial" href="/testing/services">
+    Write comprehensive tests for your services
+  </Card>
+  
+  <Card title="Models" icon="database" href="/architecture/models">
+    Understand model relationships and patterns
+  </Card>
+</CardGroup>

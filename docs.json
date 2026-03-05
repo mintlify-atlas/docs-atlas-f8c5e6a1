@@ -1,122 +1,113 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Gestión de Ventas",
+  "theme": "willow",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#ef370f",
+    "light": "#f79d72",
+    "dark": "#040404"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/ef7cdb24-cf48-44b6-9439-4288899142b4.png",
+  "logo": {
+    "light": "https://media.brand.dev/69d705f4-5e9b-4d51-bd5f-4788b2d5c4d2.svg",
+    "dark": "https://media.brand.dev/69d705f4-5e9b-4d51-bd5f-4788b2d5c4d2.svg"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/Elian-D/gestion-ventas-laravel"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/Elian-D/gestion-ventas-laravel"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "installation",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/architecture",
+              "concepts/service-layer",
+              "concepts/filters-pipeline",
+              "concepts/permissions"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Modules",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "modules/sales",
+              "modules/inventory",
+              "modules/accounting",
+              "modules/clients",
+              "modules/products",
+              "modules/invoicing"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Features",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "features/ncf-generation",
+              "features/point-of-sale",
+              "features/journal-entries",
+              "features/receivables",
+              "features/exports"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/adding-modules",
+              "development/catalog-services",
+              "development/business-services",
+              "development/form-requests"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Models",
             "pages": [
-              "api-reference/introduction"
+              "api/models/sale",
+              "api/models/invoice",
+              "api/models/client",
+              "api/models/product",
+              "api/models/inventory"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Services",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/services/sale-service",
+              "api/services/inventory-movement-service",
+              "api/services/journal-entry-service",
+              "api/services/receivable-service"
+            ]
+          },
+          {
+            "group": "Filters",
+            "pages": [
+              "api/filters/overview",
+              "api/filters/creating-filters"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

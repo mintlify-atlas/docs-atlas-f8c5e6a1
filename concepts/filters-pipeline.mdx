@@ -1,0 +1,653 @@
+---
+title: Filters & Pipeline Pattern
+description: Clean, reusable filtering system using the Pipeline pattern in Gestión de Ventas
+icon: 'filter'
+---
+
+## Overview
+
+The **Filters Pipeline** is a design pattern that keeps controllers clean by moving all query filtering logic (`where`, `whereLike`, `whereHas`, etc.) into dedicated, reusable filter classes.
+
+<Check>
+  This pattern eliminates messy controller methods filled with conditional `where` clauses based on request parameters.
+</Check>
+
+## Why Use the Pipeline Pattern?
+
+<CardGroup cols={2}>
+  <Card title="Clean Controllers" icon="broom">
+    No more cluttered if-else chains in controller methods
+  </Card>
+  <Card title="Reusable Filters" icon="recycle">
+    Share filters across index, export, and API endpoints
+  </Card>
+  <Card title="Testable" icon="vial">
+    Each filter can be unit tested independently
+  </Card>
+  <Card title="Maintainable" icon="wrench">
+    Easy to add, modify, or remove filters without touching controllers
+  </Card>
+</CardGroup>
+
+---
+
+## Architecture
+
+The filter system consists of three components:
+
+### 1. Filter Interface
+
+Defines the contract all filters must follow:
+
+```php app/Filters/Contracts/FilterInterface.php
+namespace App\Filters\Contracts;
+
+use Illuminate\Database\Eloquent\Builder;
+
+interface FilterInterface
+{
+    public function apply(Builder $query): Builder;
+}
+```
+
+### 2. Base QueryFilter
+
+Abstract class that orchestrates the filtering pipeline:
+
+```php app/Filters/Base/QueryFilter.php
+namespace App\Filters\Base;
+
+use Illuminate\Http\Request;
+use Illuminate\Database\Eloquent\Builder;
+use App\Filters\Contracts\FilterInterface;
+
+abstract class QueryFilter implements FilterInterface
+{
+    protected Request $request;
+    protected Builder $query;
+
+    public function __construct(Request $request)
+    {
+        $this->request = $request;
+    }
+
+    /**
+     * Apply all registered filters to the query
+     */
+    public function apply(Builder $query): Builder
+    {
+        $this->query = $query;
+
+        foreach ($this->filters() as $key => $filterClass) {
+            if ($this->request->filled($key)) {
+                (new $filterClass($this->request))->apply($this->query);
+            }
+        }
+
+        return $this->query;
+    }
+
+    /**
+     * Map request keys to filter classes
+     * 
+     * @return array<string, class-string>
+     */
+    abstract protected function filters(): array;
+}
+```
+
+<Note>
+  The `filters()` method maps request parameter names to their corresponding filter class.
+</Note>
+
+### 3. Module-Specific Filter Registry
+
+Each module has its own filter registry:
+
+```php app/Filters/Sales/SalesFilters/SaleFilters.php
+namespace App\Filters\Sales\SalesFilters;
+
+use App\Filters\Base\QueryFilter;
+
+class SaleFilters extends QueryFilter
+{
+    protected function filters(): array
+    {
+        return [
+            'search'       => SaleSearchFilter::class,
+            'client_id'    => SaleClientFilter::class,
+            'warehouse_id' => SaleWarehouseFilter::class,
+            'payment_type' => SalePaymentTypeFilter::class,
+            'tipo_pago_id' => SaleTipoPagoFilter::class,
+            'status'       => SaleStatusFilter::class,
+            'from_date'    => SaleDateFilter::class,
+            'min_amount'   => SaleAmountRangeFilter::class,
+        ];
+    }
+}
+```
+
+---
+
+## Individual Filter Classes
+
+Each filter is a dedicated class that handles one specific filtering concern.
+
+### Simple Exact Match Filter
+
+```php app/Filters/Sales/SalesFilters/SaleClientFilter.php
+namespace App\Filters\Sales\SalesFilters;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class SaleClientFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $value = $this->request->input('client_id');
+        return $value ? $query->where('client_id', $value) : $query;
+    }
+}
+```
+
+### Search Filter (Multiple Fields)
+
+```php app/Filters/Sales/SalesFilters/SaleSearchFilter.php
+namespace App\Filters\Sales\SalesFilters;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class SaleSearchFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $value = $this->request->input('search');
+        if (!$value) return $query;
+
+        return $query->where(function($q) use ($value) {
+            $q->where('number', 'like', "%{$value}%")
+              ->orWhere('notes', 'like', "%{$value}%")
+              ->orWhereHas('client', function($subQ) use ($value) {
+                  $subQ->where('name', 'like', "%{$value}%");
+              });
+        });
+    }
+}
+```
+
+<Tip>
+  Always wrap multiple OR conditions in a `where(function($q) {...})` closure to prevent query logic issues.
+</Tip>
+
+### Date Range Filter
+
+```php app/Filters/Sales/SalesFilters/SaleDateFilter.php
+namespace App\Filters\Sales\SalesFilters;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+use Illuminate\Support\Carbon;
+
+class SaleDateFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $from = $this->request->input('from_date');
+        $to = $this->request->input('to_date');
+
+        return $query
+            ->when($from, function($q) use ($from) {
+                return $q->whereDate('sale_date', '>=', Carbon::parse($from));
+            })
+            ->when($to, function($q) use ($to) {
+                return $q->whereDate('sale_date', '<=', Carbon::parse($to));
+            });
+    }
+}
+```
+
+<Note>
+  This filter handles both `from_date` and `to_date` parameters, allowing flexible date range queries.
+</Note>
+
+### Select/Dropdown Filter
+
+```php app/Filters/Sales/SalesFilters/SalePaymentTypeFilter.php
+namespace App\Filters\Sales\SalesFilters;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class SalePaymentTypeFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $value = $this->request->input('payment_type');
+        return $value ? $query->where('payment_type', $value) : $query;
+    }
+}
+```
+
+### Numeric Range Filter
+
+```php app/Filters/Sales/SalesFilters/SaleAmountRangeFilter.php
+namespace App\Filters\Sales\SalesFilters;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use App\Filters\Contracts\FilterInterface;
+
+class SaleAmountRangeFilter implements FilterInterface
+{
+    public function __construct(protected Request $request) {}
+
+    public function apply(Builder $query): Builder
+    {
+        $min = $this->request->input('min_amount');
+        $max = $this->request->input('max_amount');
+
+        return $query
+            ->when($min, fn($q) => $q->where('total_amount', '>=', $min))
+            ->when($max, fn($q) => $q->where('total_amount', '<=', $max));
+    }
+}
+```
+
+---
+
+## Usage in Controllers
+
+Applying filters in a controller is clean and simple:
+
+```php app/Http/Controllers/Sales/SaleController.php
+public function index(Request $request)
+{
+    $visibleColumns = $request->input('columns', SaleTable::defaultDesktop());
+    $perPage = $request->input('per_page', 10);
+
+    // Apply filter pipeline
+    $sales = (new SaleFilters($request))
+        ->apply(Sale::query()->withIndexRelations())
+        ->latest()
+        ->paginate($perPage)
+        ->withQueryString();
+
+    $catalogs = $this->catalogService->getForFilters();
+
+    if ($request->ajax()) {
+        return view('sales.partials.table', [
+            'items' => $sales,
+            'visibleColumns' => $visibleColumns,
+            'allColumns' => SaleTable::allColumns(),
+        ])->render();
+    }
+
+    return view('sales.index', array_merge(
+        [
+            'items' => $sales,
+            'visibleColumns' => $visibleColumns,
+            'allColumns' => SaleTable::allColumns(),
+        ],
+        $catalogs
+    ));
+}
+```
+
+<Accordion title="How does it work?">
+  1. Create a new `SaleFilters` instance with the current request
+  2. Call `apply()` on a base query builder (with eager loaded relations)
+  3. The pipeline checks each registered filter
+  4. If the request has that parameter, the filter is applied
+  5. Continue with pagination, sorting, etc.
+</Accordion>
+
+---
+
+## Export with Same Filters
+
+The beauty of this pattern: **reuse filters for exports**!
+
+```php app/Http/Controllers/Sales/SaleController.php
+public function export(Request $request)
+{
+    // Same filters as index!
+    $query = (new SaleFilters($request))
+        ->apply(Sale::query()->withIndexRelations());
+
+    $fileName = 'reporte-ventas-' . now()->format('d-m-Y-H-i') . '.xlsx';
+
+    return Excel::download(new SalesExport($query), $fileName);
+}
+```
+
+<Check>
+  Users get exactly the data they filtered on the screen, exported to Excel. No code duplication!
+</Check>
+
+---
+
+## Request Parameters
+
+The filter system expects query string parameters:
+
+<Tabs>
+  <Tab title="Simple Filters">
+    ```bash
+    # Filter by client
+    GET /sales?client_id=5
+
+    # Filter by payment type
+    GET /sales?payment_type=cash
+
+    # Filter by status
+    GET /sales?status=completed
+    ```
+  </Tab>
+  <Tab title="Search">
+    ```bash
+    # Search across multiple fields
+    GET /sales?search=Juan
+    ```
+  </Tab>
+  <Tab title="Date Ranges">
+    ```bash
+    # Single date
+    GET /sales?from_date=2024-01-01
+
+    # Date range
+    GET /sales?from_date=2024-01-01&to_date=2024-01-31
+    ```
+  </Tab>
+  <Tab title="Numeric Ranges">
+    ```bash
+    # Minimum amount
+    GET /sales?min_amount=1000
+
+    # Amount range
+    GET /sales?min_amount=1000&max_amount=5000
+    ```
+  </Tab>
+  <Tab title="Combined">
+    ```bash
+    # Multiple filters at once
+    GET /sales?client_id=5&payment_type=cash&from_date=2024-01-01&min_amount=500
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Creating a New Filter
+
+Follow this process to add a new filter to any module:
+
+<Steps>
+  <Step title="Create the Filter Class">
+    ```bash
+    php artisan make:class Filters/Sales/SalesFilters/SaleUserFilter
+    ```
+  </Step>
+  
+  <Step title="Implement FilterInterface">
+    ```php
+    namespace App\Filters\Sales\SalesFilters;
+
+    use Illuminate\Database\Eloquent\Builder;
+    use Illuminate\Http\Request;
+    use App\Filters\Contracts\FilterInterface;
+
+    class SaleUserFilter implements FilterInterface
+    {
+        public function __construct(protected Request $request) {}
+
+        public function apply(Builder $query): Builder
+        {
+            $userId = $this->request->input('user_id');
+            return $userId ? $query->where('user_id', $userId) : $query;
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Register in Filter Registry">
+    ```php app/Filters/Sales/SalesFilters/SaleFilters.php
+    protected function filters(): array
+    {
+        return [
+            'search'       => SaleSearchFilter::class,
+            'client_id'    => SaleClientFilter::class,
+            'user_id'      => SaleUserFilter::class, // ← Add this
+            // ... other filters
+        ];
+    }
+    ```
+  </Step>
+  
+  <Step title="Add to Catalog Service">
+    ```php app/Services/Sales/SalesServices/SaleCatalogService.php
+    public function getForFilters(): array
+    {
+        return [
+            'clients' => Client::select('id', 'name')->get(),
+            'users' => User::select('id', 'name')->get(), // ← Add this
+            // ... other catalogs
+        ];
+    }
+    ```
+  </Step>
+  
+  <Step title="Update the View">
+    Add the filter UI component to your index view:
+    ```html
+    <select name="user_id" class="form-select">
+        <option value="">Todos los vendedores</option>
+        @foreach($users as $user)
+            <option value="{{ $user->id }}" {{ request('user_id') == $user->id ? 'selected' : '' }}>
+                {{ $user->name }}
+            </option>
+        @endforeach
+    </select>
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Filter Patterns & Examples
+
+<AccordionGroup>
+  <Accordion title="Exact Match Filter">
+    Use when filtering by ID or exact value:
+    
+    ```php
+    public function apply(Builder $query): Builder
+    {
+        $value = $this->request->input('warehouse_id');
+        return $value ? $query->where('warehouse_id', $value) : $query;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Like/Search Filter">
+    Use for text search across multiple fields:
+    
+    ```php
+    public function apply(Builder $query): Builder
+    {
+        $search = $this->request->input('search');
+        if (!$search) return $query;
+
+        return $query->where(function($q) use ($search) {
+            $q->where('name', 'like', "%{$search}%")
+              ->orWhere('code', 'like', "%{$search}%")
+              ->orWhere('description', 'like', "%{$search}%");
+        });
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Relationship Filter">
+    Use when filtering through a relationship:
+    
+    ```php
+    public function apply(Builder $query): Builder
+    {
+        $categoryId = $this->request->input('category_id');
+        if (!$categoryId) return $query;
+
+        return $query->whereHas('product', function($q) use ($categoryId) {
+            $q->where('category_id', $categoryId);
+        });
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Boolean/Checkbox Filter">
+    Use for true/false filters:
+    
+    ```php
+    public function apply(Builder $query): Builder
+    {
+        if ($this->request->has('only_active')) {
+            return $query->where('is_active', true);
+        }
+        return $query;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Array/Multiple Values Filter">
+    Use when filtering by multiple selected values:
+    
+    ```php
+    public function apply(Builder $query): Builder
+    {
+        $statuses = $this->request->input('statuses', []);
+        if (empty($statuses)) return $query;
+
+        return $query->whereIn('status', $statuses);
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Testing Filters
+
+Filters are easy to test in isolation:
+
+```php tests/Unit/Filters/SaleClientFilterTest.php
+use Tests\TestCase;
+use App\Models\Sales\Sale;
+use App\Filters\Sales\SalesFilters\SaleClientFilter;
+use Illuminate\Http\Request;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class SaleClientFilterTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_filters_by_client_id()
+    {
+        // Arrange
+        $client1 = Client::factory()->create();
+        $client2 = Client::factory()->create();
+        
+        Sale::factory()->create(['client_id' => $client1->id]);
+        Sale::factory()->create(['client_id' => $client1->id]);
+        Sale::factory()->create(['client_id' => $client2->id]);
+
+        $request = Request::create('/', 'GET', ['client_id' => $client1->id]);
+        $filter = new SaleClientFilter($request);
+
+        // Act
+        $query = $filter->apply(Sale::query());
+        $results = $query->get();
+
+        // Assert
+        $this->assertCount(2, $results);
+        $this->assertTrue($results->every(fn($sale) => $sale->client_id === $client1->id));
+    }
+
+    public function test_returns_all_when_no_filter()
+    {
+        // Arrange
+        Sale::factory()->count(5)->create();
+        $request = Request::create('/', 'GET');
+        $filter = new SaleClientFilter($request);
+
+        // Act
+        $results = $filter->apply(Sale::query())->get();
+
+        // Assert
+        $this->assertCount(5, $results);
+    }
+}
+```
+
+---
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="One Filter, One Concern" icon="bullseye">
+    Each filter class should handle exactly one filtering concern. Don't mix date and amount filtering in one class.
+  </Card>
+  <Card title="Return Query Builder" icon="arrow-turn-up">
+    Always return the `$query` object, even if no filter is applied.
+  </Card>
+  <Card title="Use Type Hints" icon="code">
+    Declare parameter and return types for better IDE support and type safety.
+  </Card>
+  <Card title="Null Safety" icon="shield">
+    Always check if the request parameter exists before applying the filter.
+  </Card>
+</CardGroup>
+
+<Warning>
+  Never modify the request inside a filter. Filters should be read-only operations on the query builder.
+</Warning>
+
+---
+
+## Benefits Summary
+
+| Benefit | Description |
+|---------|-------------|
+| **Separation of Concerns** | Filtering logic is separate from controllers |
+| **Reusability** | Same filters for index, export, API, reports |
+| **Testability** | Each filter can be unit tested independently |
+| **Readability** | Controller methods are clean and focused |
+| **Maintainability** | Easy to add, modify, or remove filters |
+| **Flexibility** | Combine any number of filters dynamically |
+
+---
+
+## Related Documentation
+
+<CardGroup cols={3}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Understand the overall system design
+  </Card>
+  <Card title="Service Layer" icon="gear" href="/concepts/service-layer">
+    Learn about business logic services
+  </Card>
+  <Card title="Permissions" icon="shield-check" href="/concepts/permissions">
+    Authorization and security
+  </Card>
+</CardGroup>

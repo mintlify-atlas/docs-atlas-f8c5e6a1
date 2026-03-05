@@ -1,0 +1,755 @@
+---
+title: Permissions & Authorization
+description: Understanding the permission system and authorization flow in Gestión de Ventas
+icon: 'shield-check'
+---
+
+## Overview
+
+Gestión de Ventas uses **Spatie Laravel Permission** package to manage user permissions and roles. Authorization is enforced at the **Form Request level**, ensuring that permission checks happen before any business logic executes.
+
+<Check>
+  All permission validation occurs in Form Requests, not in controllers or services.
+</Check>
+
+## Why Spatie Permission?
+
+<CardGroup cols={2}>
+  <Card title="Role-Based Access" icon="users">
+    Assign permissions to roles, then roles to users
+  </Card>
+  <Card title="Direct Permissions" icon="user-lock">
+    Grant specific permissions directly to individual users
+  </Card>
+  <Card title="Cached" icon="bolt">
+    Permissions are cached for 24 hours for performance
+  </Card>
+  <Card title="Middleware Support" icon="shield">
+    Protect routes with built-in middleware
+  </Card>
+</CardGroup>
+
+---
+
+## Permission Configuration
+
+The Spatie permission configuration is located at:
+
+```php config/permission.php
+return [
+    'models' => [
+        'permission' => Spatie\Permission\Models\Permission::class,
+        'role' => Spatie\Permission\Models\Role::class,
+    ],
+
+    'table_names' => [
+        'roles' => 'roles',
+        'permissions' => 'permissions',
+        'model_has_permissions' => 'model_has_permissions',
+        'model_has_roles' => 'model_has_roles',
+        'role_has_permissions' => 'role_has_permissions',
+    ],
+
+    'cache' => [
+        'expiration_time' => \DateInterval::createFromDateString('24 hours'),
+        'key' => 'spatie.permission.cache',
+        'store' => 'default',
+    ],
+];
+```
+
+<Note>
+  Permissions are cached for 24 hours by default. When you update permissions, the cache is automatically flushed.
+</Note>
+
+---
+
+## Permission Naming Convention
+
+Gestión de Ventas follows a consistent naming pattern for permissions:
+
+```
+{action} {module}
+```
+
+### Standard Permissions per Module
+
+Every module typically has these permissions:
+
+| Permission | Description |
+|------------|-------------|
+| `view {module}` | View the index/list page |
+| `create {module}` | Access create form and store new records |
+| `edit {module}` | Access edit form and update records |
+| `delete {module}` | Soft delete records |
+| `restore {module}` | Restore soft-deleted records |
+| `force-delete {module}` | Permanently delete records |
+| `export {module}` | Export data to Excel/PDF |
+| `bulk-action {module}` | Perform bulk operations |
+
+### Example: Sales Module Permissions
+
+```php database/seeders/SalesPermissionsSeeder.php
+use Spatie\Permission\Models\Permission;
+
+class SalesPermissionsSeeder extends Seeder
+{
+    public function run()
+    {
+        $permissions = [
+            'view sales',
+            'create sales',
+            'edit sales',
+            'delete sales',
+            'restore sales',
+            'force-delete sales',
+            'export sales',
+            'cancel sales', // Special permission for voiding sales
+        ];
+
+        foreach ($permissions as $permission) {
+            Permission::firstOrCreate(['name' => $permission]);
+        }
+    }
+}
+```
+
+<Tip>
+  Run permission seeders after every deployment to ensure new permissions are registered.
+</Tip>
+
+---
+
+## Authorization Flow
+
+Permissions are checked at multiple levels:
+
+<Steps>
+  <Step title="Form Request Authorization">
+    The primary authorization check happens in Form Requests via the `authorize()` method.
+  </Step>
+  <Step title="Route Middleware (Optional)">
+    Some routes use middleware for an additional layer of protection.
+  </Step>
+  <Step title="View/Blade Directives">
+    UI elements are conditionally shown based on permissions.
+  </Step>
+</Steps>
+
+---
+
+## Form Request Authorization
+
+This is where **primary permission checking** occurs.
+
+### Basic Authorization
+
+```php app/Http/Requests/Sales/StoreSaleRequest.php
+namespace App\Http\Requests\Sales;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class StoreSaleRequest extends FormRequest
+{
+    /**
+     * Determine if the user is authorized to make this request.
+     * This runs BEFORE validation.
+     */
+    public function authorize(): bool
+    {
+        return $this->user()->can('create sales');
+    }
+
+    public function rules(): array
+    {
+        return [
+            'client_id' => ['required', 'exists:clients,id'],
+            'total_amount' => ['required', 'numeric', 'min:0'],
+            // ... other rules
+        ];
+    }
+}
+```
+
+<Note>
+  If `authorize()` returns `false`, Laravel automatically returns a **403 Forbidden** response before validation even runs.
+</Note>
+
+### Update Request Authorization
+
+```php app/Http/Requests/Sales/UpdateSaleRequest.php
+class UpdateSaleRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        // Can also check specific model policies
+        return $this->user()->can('edit sales');
+    }
+}
+```
+
+### Bulk Action Authorization
+
+```php app/Http/Requests/Sales/BulkSaleRequest.php
+class BulkSaleRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        $action = $this->input('action');
+
+        // Different permissions for different bulk actions
+        return match($action) {
+            'delete' => $this->user()->can('delete sales'),
+            'restore' => $this->user()->can('restore sales'),
+            'export' => $this->user()->can('export sales'),
+            default => false,
+        };
+    }
+
+    public function rules(): array
+    {
+        return [
+            'ids' => ['required', 'array', 'min:1'],
+            'ids.*' => ['exists:sales,id'],
+            'action' => ['required', 'in:delete,restore,export'],
+        ];
+    }
+}
+```
+
+<Accordion title="Why use Form Requests for authorization?">
+  Form Requests provide a clean, centralized place for both validation and authorization. This keeps controllers thin and makes it easy to test authorization logic independently.
+</Accordion>
+
+---
+
+## Controller Usage
+
+Controllers rely on Form Requests for authorization:
+
+```php app/Http/Controllers/Sales/SaleController.php
+class SaleController extends Controller
+{
+    /**
+     * No authorization check needed here!
+     * StoreSaleRequest handles it.
+     */
+    public function store(StoreSaleRequest $request)
+    {
+        $sale = $this->service->create($request->validated());
+        
+        return redirect()
+            ->route('sales.index')
+            ->with('success', "Venta #{$sale->number} registrada.");
+    }
+
+    /**
+     * For methods without Form Requests, check manually
+     */
+    public function cancel(Request $request, Sale $sale)
+    {
+        // Manual authorization check
+        if (!auth()->user()->can('cancel sales')) {
+            abort(403, 'No autorizado para anular ventas.');
+        }
+
+        $this->service->cancel($sale, $request->input('cancellation_reason'));
+        
+        return back()->with('success', 'Venta anulada.');
+    }
+}
+```
+
+<Warning>
+  For custom methods without Form Requests, always add manual authorization checks.
+</Warning>
+
+---
+
+## Route Middleware Protection
+
+For additional security, you can protect entire routes:
+
+```php routes/web.php
+use Illuminate\Support\Facades\Route;
+
+// Protect individual routes
+Route::get('/sales', [SaleController::class, 'index'])
+    ->middleware('permission:view sales');
+
+// Protect route groups
+Route::middleware(['auth', 'permission:view sales'])->group(function () {
+    Route::resource('sales', SaleController::class);
+});
+
+// Multiple permissions (user needs ALL of them)
+Route::middleware('permission:create sales|edit sales')->group(function () {
+    // Routes here
+});
+
+// Role-based protection
+Route::middleware('role:admin|manager')->group(function () {
+    // Routes here
+});
+```
+
+<Tabs>
+  <Tab title="Permission Middleware">
+    ```php
+    // User must have the exact permission
+    ->middleware('permission:create sales')
+    ```
+  </Tab>
+  <Tab title="Role Middleware">
+    ```php
+    // User must have the role
+    ->middleware('role:admin')
+    ```
+  </Tab>
+  <Tab title="Multiple Options">
+    ```php
+    // User needs ANY of these permissions (OR)
+    ->middleware('permission:edit sales|delete sales')
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Blade Directives
+
+Conditionally show/hide UI elements based on permissions:
+
+### @can Directive
+
+```blade
+@can('create sales')
+    <a href="{{ route('sales.create') }}" class="btn btn-primary">
+        <i class="fas fa-plus"></i> Nueva Venta
+    </a>
+@endcan
+
+@can('edit sales')
+    <a href="{{ route('sales.edit', $sale) }}" class="btn btn-sm btn-warning">
+        <i class="fas fa-edit"></i> Editar
+    </a>
+@endcan
+
+@can('delete sales')
+    <form action="{{ route('sales.destroy', $sale) }}" method="POST" class="d-inline">
+        @csrf
+        @method('DELETE')
+        <button type="submit" class="btn btn-sm btn-danger">
+            <i class="fas fa-trash"></i> Eliminar
+        </button>
+    </form>
+@endcan
+```
+
+### @cannot Directive
+
+```blade
+@cannot('create sales')
+    <p class="text-muted">No tiene permisos para crear ventas.</p>
+@endcannot
+```
+
+### Multiple Permissions
+
+```blade
+{{-- User needs ANY of these permissions --}}
+@canany(['edit sales', 'delete sales'])
+    <div class="action-buttons">
+        @can('edit sales')
+            <button>Editar</button>
+        @endcan
+        
+        @can('delete sales')
+            <button>Eliminar</button>
+        @endcan
+    </div>
+@endcanany
+```
+
+### Role-Based Display
+
+```blade
+@role('admin')
+    <div class="admin-panel">
+        <h3>Panel de Administrador</h3>
+        <!-- Admin-only content -->
+    </div>
+@endrole
+
+@hasrole('admin|manager')
+    <!-- Content for admins OR managers -->
+@endhasrole
+```
+
+---
+
+## Checking Permissions in Code
+
+### In Controllers
+
+```php
+// Check if user has permission
+if (auth()->user()->can('create sales')) {
+    // Allow action
+}
+
+// Check multiple permissions (user needs ALL)
+if (auth()->user()->hasAllPermissions(['create sales', 'edit sales'])) {
+    // Allow action
+}
+
+// Check multiple permissions (user needs ANY)
+if (auth()->user()->hasAnyPermission(['edit sales', 'delete sales'])) {
+    // Allow action
+}
+
+// Abort if no permission
+auth()->user()->canOrFail('delete sales');
+
+// Alternative syntax
+$this->authorize('delete sales');
+```
+
+### In Services
+
+```php
+class SaleService
+{
+    public function create(array $data): Sale
+    {
+        // Check permission in service if needed
+        if (!auth()->user()->can('create sales')) {
+            throw new AuthorizationException('No autorizado.');
+        }
+        
+        return DB::transaction(function () use ($data) {
+            // ... create logic
+        });
+    }
+}
+```
+
+<Warning>
+  Avoid permission checks in services. Keep them in Form Requests and controllers for better separation of concerns.
+</Warning>
+
+### In Policies (Advanced)
+
+For more complex authorization logic, use policies:
+
+```php app/Policies/SalePolicy.php
+namespace App\Policies;
+
+use App\Models\User;
+use App\Models\Sales\Sale;
+
+class SalePolicy
+{
+    /**
+     * Determine if user can update the sale
+     */
+    public function update(User $user, Sale $sale): bool
+    {
+        // Must have permission AND sale must not be canceled
+        return $user->can('edit sales') 
+            && $sale->status !== Sale::STATUS_CANCELED;
+    }
+
+    /**
+     * Determine if user can delete the sale
+     */
+    public function delete(User $user, Sale $sale): bool
+    {
+        // Must have permission AND no payments received
+        return $user->can('delete sales')
+            && $sale->payment_type === Sale::PAYMENT_CASH;
+    }
+}
+```
+
+Register the policy:
+
+```php app/Providers/AuthServiceProvider.php
+protected $policies = [
+    Sale::class => SalePolicy::class,
+];
+```
+
+Use in Form Request:
+
+```php
+public function authorize(): bool
+{
+    return $this->user()->can('update', $this->route('sale'));
+}
+```
+
+---
+
+## Role Management
+
+### Creating Roles
+
+```php database/seeders/RoleSeeder.php
+use Spatie\Permission\Models\{Role, Permission};
+
+class RoleSeeder extends Seeder
+{
+    public function run()
+    {
+        // Create roles
+        $admin = Role::create(['name' => 'admin']);
+        $manager = Role::create(['name' => 'manager']);
+        $vendedor = Role::create(['name' => 'vendedor']);
+
+        // Assign all permissions to admin
+        $admin->givePermissionTo(Permission::all());
+
+        // Assign specific permissions to manager
+        $manager->givePermissionTo([
+            'view sales',
+            'create sales',
+            'edit sales',
+            'export sales',
+        ]);
+
+        // Assign limited permissions to vendedor
+        $vendedor->givePermissionTo([
+            'view sales',
+            'create sales',
+        ]);
+    }
+}
+```
+
+### Assigning Roles to Users
+
+```php
+// Assign a role
+$user->assignRole('vendedor');
+
+// Assign multiple roles
+$user->assignRole(['vendedor', 'manager']);
+
+// Remove role
+$user->removeRole('vendedor');
+
+// Sync roles (removes all others)
+$user->syncRoles(['admin']);
+
+// Check if user has role
+if ($user->hasRole('admin')) {
+    // ...
+}
+```
+
+### Direct Permission Assignment
+
+```php
+// Give permission directly to user (bypasses roles)
+$user->givePermissionTo('delete sales');
+
+// Revoke permission
+$user->revokePermissionTo('delete sales');
+
+// Sync permissions
+$user->syncPermissions(['view sales', 'create sales']);
+```
+
+---
+
+## Complex Authorization Example
+
+Let's look at a real-world example with multiple validation layers:
+
+```php app/Http/Requests/Sales/StoreSaleRequest.php
+class StoreSaleRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        // Basic permission check
+        return $this->user()->can('create sales');
+    }
+
+    public function rules(): array
+    {
+        return [
+            'client_id'    => ['required', 'exists:clients,id'],
+            'warehouse_id' => ['required', 'exists:warehouses,id'],
+            'payment_type' => ['required', Rule::in([Sale::PAYMENT_CASH, Sale::PAYMENT_CREDIT])],
+            'total_amount' => ['required', 'numeric', 'min:0'],
+            'items'        => ['required', 'array', 'min:1'],
+            'items.*.product_id' => ['required', 'exists:products,id'],
+            'items.*.quantity'   => ['required', 'numeric', 'min:0.01'],
+            'items.*.price'      => ['required', 'numeric', 'min:0'],
+        ];
+    }
+
+    public function withValidator($validator)
+    {
+        $validator->after(function ($validator) {
+            if ($validator->errors()->any()) return;
+
+            $client = Client::find($this->client_id);
+
+            // Business rule validation (after permission check)
+            if ($this->payment_type === Sale::PAYMENT_CREDIT) {
+                // Check if user has permission for credit sales
+                if (!$this->user()->can('create credit sales')) {
+                    $validator->errors()->add(
+                        'payment_type',
+                        'No tiene permiso para ventas a crédito.'
+                    );
+                }
+
+                // Check client credit limit
+                if ($client->balance + $this->total_amount > $client->credit_limit) {
+                    $validator->errors()->add(
+                        'total_amount',
+                        'Límite de crédito del cliente excedido.'
+                    );
+                }
+            }
+
+            // Validate stock
+            foreach ($this->items as $index => $item) {
+                $stock = InventoryStock::where('warehouse_id', $this->warehouse_id)
+                    ->where('product_id', $item['product_id'])
+                    ->first();
+
+                if (!$stock || $stock->quantity < $item['quantity']) {
+                    $validator->errors()->add(
+                        "items.{$index}.quantity",
+                        "Stock insuficiente."
+                    );
+                }
+            }
+        });
+    }
+}
+```
+
+---
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Descriptive Permission Names">
+    ✅ Good: `create sales`, `export invoices`, `cancel purchases`
+    
+    ❌ Bad: `sales_create`, `inv_exp`, `cancel`
+  </Accordion>
+
+  <Accordion title="Check Permissions in Form Requests">
+    Always use Form Request `authorize()` method as the primary authorization layer.
+    
+    ```php
+    public function authorize(): bool
+    {
+        return $this->user()->can('create sales');
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Keep Controllers Permission-Free">
+    Controllers should rely on Form Requests for authorization, keeping them clean.
+  </Accordion>
+
+  <Accordion title="Seed Permissions After Deploy">
+    Always run permission seeders after deployment to ensure new permissions exist.
+    
+    ```bash
+    php artisan db:seed --class=SalesPermissionsSeeder
+    ```
+  </Accordion>
+
+  <Accordion title="Clear Cache When Needed">
+    If permissions aren't updating, clear the cache:
+    
+    ```bash
+    php artisan permission:cache-reset
+    php artisan cache:clear
+    ```
+  </Accordion>
+
+  <Accordion title="Use Policies for Complex Logic">
+    When authorization depends on the model state, use policies instead of simple permission checks.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Testing Permissions
+
+```php tests/Feature/SaleAuthorizationTest.php
+use Tests\TestCase;
+use App\Models\User;
+use App\Models\Sales\Sale;
+use Spatie\Permission\Models\Permission;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class SaleAuthorizationTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_user_with_permission_can_create_sale()
+    {
+        // Arrange
+        $permission = Permission::create(['name' => 'create sales']);
+        $user = User::factory()->create();
+        $user->givePermissionTo($permission);
+
+        // Act
+        $response = $this->actingAs($user)->post('/sales', [
+            'client_id' => 1,
+            'total_amount' => 100,
+            // ... other data
+        ]);
+
+        // Assert
+        $response->assertStatus(302); // Redirect (success)
+    }
+
+    public function test_user_without_permission_cannot_create_sale()
+    {
+        // Arrange
+        $user = User::factory()->create(); // No permissions
+
+        // Act
+        $response = $this->actingAs($user)->post('/sales', [
+            'client_id' => 1,
+            'total_amount' => 100,
+        ]);
+
+        // Assert
+        $response->assertStatus(403); // Forbidden
+    }
+}
+```
+
+---
+
+## Related Documentation
+
+<CardGroup cols={3}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Understand the overall system design
+  </Card>
+  <Card title="Service Layer" icon="gear" href="/concepts/service-layer">
+    Learn about business logic services
+  </Card>
+  <Card title="Filters Pipeline" icon="filter" href="/concepts/filters-pipeline">
+    Clean filtering patterns
+  </Card>
+</CardGroup>
+
+## External Resources
+
+<Card title="Spatie Laravel Permission Docs" icon="book" href="https://spatie.be/docs/laravel-permission">
+  Official documentation for the Spatie Laravel Permission package
+</Card>

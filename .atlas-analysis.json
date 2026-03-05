@@ -1,0 +1,123 @@
+{
+  "projectType": "saas",
+  "projectName": "Gestión de Ventas",
+  "projectDescription": "Complete sales management ERP system for tracking sales, inventory, accounting, clients, and generating tax-compliant invoices",
+  "theme": "willow",
+  "primaryColor": "#ef370f",
+  "lightColor": "#f79d72",
+  "darkColor": "#040404",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/service-layer",
+              "concepts/filters-pipeline",
+              "concepts/permissions"
+            ]
+          },
+          {
+            "group": "Modules",
+            "pages": [
+              "modules/sales",
+              "modules/inventory",
+              "modules/accounting",
+              "modules/clients",
+              "modules/products",
+              "modules/invoicing"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/ncf-generation",
+              "features/point-of-sale",
+              "features/journal-entries",
+              "features/receivables",
+              "features/exports"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/adding-modules",
+              "development/catalog-services",
+              "development/business-services",
+              "development/form-requests"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Models",
+            "pages": [
+              "api/models/sale",
+              "api/models/invoice",
+              "api/models/client",
+              "api/models/product",
+              "api/models/inventory"
+            ]
+          },
+          {
+            "group": "Services",
+            "pages": [
+              "api/services/sale-service",
+              "api/services/inventory-movement-service",
+              "api/services/journal-entry-service",
+              "api/services/receivable-service"
+            ]
+          },
+          {
+            "group": "Filters",
+            "pages": [
+              "api/filters/overview",
+              "api/filters/creating-filters"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Sales tracking and management",
+    "Real-time inventory control",
+    "Double-entry accounting system",
+    "Client and equipment management",
+    "NCF (Dominican fiscal number) generation",
+    "Point of sale functionality",
+    "Invoice generation and printing",
+    "Receivables and payment tracking",
+    "Role-based access control",
+    "Excel export functionality"
+  ],
+  "publicApiSurface": [
+    "Sale::create()",
+    "SaleService::create()",
+    "SaleService::cancel()",
+    "InventoryMovementService::register()",
+    "JournalEntryService::create()",
+    "ReceivableService::createReceivable()",
+    "NcfGeneratorInterface::generate()",
+    "InvoiceService::createFromSale()",
+    "Sale::withIndexRelations()",
+    "Invoice::withIndexRelations()",
+    "SaleFilters::apply()",
+    "SaleCatalogService::getForForm()",
+    "SaleCatalogService::getForFilters()"
+  ]
+}
